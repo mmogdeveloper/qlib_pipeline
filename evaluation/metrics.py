@@ -153,13 +153,16 @@ def load_ic_from_recorder(recorder) -> Dict:
     return None
 
 
-def load_ic_series_from_recorder(recorder, use_raw_label: bool = False) -> Optional[pd.Series]:
+def load_ic_series_from_recorder(
+    recorder, use_raw_label: bool = False, method: str = "pearson",
+) -> Optional[pd.Series]:
     """从 Recorder 加载 IC 时间序列（用于可视化）
 
     Args:
         recorder: Qlib Recorder 对象
         use_raw_label: 若 True，用原始收益率而非 CSRankNorm 后的 label 计算 IC
                        这提供了一个不受 label 预处理影响的独立 IC 校验
+        method: 相关系数方法，"pearson" 或 "spearman"（Rank IC）
 
     Returns:
         IC 时间序列 Series，失败返回 None
@@ -170,7 +173,6 @@ def load_ic_series_from_recorder(recorder, use_raw_label: bool = False) -> Optio
             return None
 
         if use_raw_label:
-            # 用原始 label（未经 CSRankNorm）重新计算 IC，作为独立校验
             label = _compute_raw_labels(pred)
             if label is None:
                 logger.warning("无法计算原始 label，回退到 label.pkl")
@@ -189,14 +191,20 @@ def load_ic_series_from_recorder(recorder, use_raw_label: bool = False) -> Optio
         concat.columns = ["pred", "label"]
         concat = concat.dropna()
 
-        ic = concat.groupby(level=0).apply(
-            lambda x: x["pred"].corr(x["label"])
-        )
+        if method == "spearman":
+            ic = concat.groupby(level=0).apply(
+                lambda x: x["pred"].corr(x["label"], method="spearman")
+            )
+        else:
+            ic = concat.groupby(level=0).apply(
+                lambda x: x["pred"].corr(x["label"])
+            )
         label_type = "原始" if use_raw_label else "CSRankNorm"
+        method_label = "Rank IC" if method == "spearman" else "IC"
         ic_mean = ic.mean()
-        logger.info(f"IC 时间序列已计算({label_type} label): {len(ic)} 个交易日, "
-                     f"IC均值={ic_mean:.4f}" if not pd.isna(ic_mean) else
-                     f"IC 时间序列已计算({label_type} label): {len(ic)} 个交易日, IC均值=NaN")
+        logger.info(f"{method_label} 时间序列已计算({label_type} label): {len(ic)} 个交易日, "
+                     f"{method_label}均值={ic_mean:.4f}" if not pd.isna(ic_mean) else
+                     f"{method_label} 时间序列已计算({label_type} label): {len(ic)} 个交易日, {method_label}均值=NaN")
         return ic
     except Exception as e:
         logger.warning(f"计算 IC 时间序列失败: {e}")

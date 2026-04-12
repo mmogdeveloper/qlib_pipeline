@@ -16,6 +16,111 @@ from loguru import logger
 from utils.helpers import get_strategy_config, get_backtest_config
 
 
+def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
+    """过滤不可交易的股票（停牌、ST、次新）
+
+    通过 Qlib D.features() 查询当日 volume 和近期涨跌幅来判断：
+    - 停牌: volume == 0
+    - ST: 近10个交易日最大|涨跌幅| <= 5.5%（ST股涨跌停5%，留0.5%容差）
+    - 次新: 股票在数据中的首个交易日距今不满60个交易日
+
+    Args:
+        pred_score: MultiIndex=(datetime, instrument) 的预测分数
+
+    Returns:
+        过滤后的 pred_score
+    """
+    from qlib.data import D
+
+    st_config = get_strategy_config()
+    trading_rules = st_config.get("trading_rules", {})
+
+    if not isinstance(pred_score.index, pd.MultiIndex):
+        return pred_score
+
+    instruments = pred_score.index.get_level_values(1).unique().tolist()
+    dates = pred_score.index.get_level_values(0)
+    start_date = str(dates.min())[:10]
+    end_date = str(dates.max())[:10]
+
+    total_before = len(pred_score)
+    mask = pd.Series(True, index=pred_score.index)
+
+    # 停牌过滤: volume == 0
+    if trading_rules.get("suspend_filter", False):
+        try:
+            volume_df = D.features(
+                instruments, ["$volume"], start_time=start_date, end_time=end_date
+            )
+            volume_df.columns = ["volume"]
+            suspended = volume_df["volume"].isna() | (volume_df["volume"] <= 0)
+            common_idx = mask.index.intersection(suspended.index)
+            mask.loc[common_idx] = mask.loc[common_idx] & ~suspended.loc[common_idx]
+            n_suspended = suspended.loc[common_idx].sum()
+            logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
+        except Exception as e:
+            logger.warning(f"停牌过滤失败: {e}")
+
+    # ST 过滤: 近10日最大|日收益率| <= 5.5%（ST股涨跌停5%）
+    if trading_rules.get("st_filter", False):
+        try:
+            close_df = D.features(
+                instruments, ["$close", "Ref($close,1)"],
+                start_time=start_date, end_time=end_date,
+            )
+            close_df.columns = ["close", "prev_close"]
+            daily_ret = (close_df["close"] / close_df["prev_close"] - 1).abs()
+            max_ret_10d = daily_ret.groupby(level=1).rolling(10, min_periods=5).max()
+            max_ret_10d = max_ret_10d.droplevel(0)
+            is_st = max_ret_10d <= 0.055
+            common_idx = mask.index.intersection(is_st.index)
+            mask.loc[common_idx] = mask.loc[common_idx] & ~is_st.loc[common_idx]
+            n_st = is_st.loc[common_idx].sum()
+            logger.info(f"ST 过滤（涨跌幅推断）: 移除 {n_st} 条记录")
+        except Exception as e:
+            logger.warning(f"ST 过滤失败: {e}")
+
+    # 次新股过滤: 上市不满 N 个交易日
+    ipo_config = trading_rules.get("ipo_filter", {})
+    if ipo_config.get("enabled", False):
+        try:
+            ipo_days = ipo_config.get("days", 60)
+            all_calendar = D.calendar(start_time="2005-01-01", end_time=end_date)
+            cal_index = {d: i for i, d in enumerate(all_calendar)}
+
+            vol_all = D.features(
+                instruments, ["$volume"], start_time="2005-01-01", end_time=end_date,
+            )
+            first_trade = vol_all[vol_all["$volume"] > 0].groupby(level=1).apply(
+                lambda x: x.index.get_level_values(0).min()
+            )
+
+            ipo_mask = pd.Series(False, index=pred_score.index)
+            for inst, listing_dt in first_trade.items():
+                if listing_dt is pd.NaT:
+                    continue
+                listing_idx = cal_index.get(listing_dt, 0)
+                cutoff_idx = listing_idx + ipo_days
+                if cutoff_idx < len(all_calendar):
+                    cutoff_date = all_calendar[cutoff_idx]
+                else:
+                    cutoff_date = all_calendar[-1]
+                inst_mask = (pred_score.index.get_level_values(1) == inst) & \
+                            (pred_score.index.get_level_values(0) < cutoff_date)
+                ipo_mask = ipo_mask | inst_mask
+
+            mask = mask & ~ipo_mask
+            n_ipo = ipo_mask.sum()
+            logger.info(f"次新股过滤（{ipo_days}日）: ���除 {n_ipo} 条记录")
+        except Exception as e:
+            logger.warning(f"次新股过滤失���: {e}")
+
+    filtered = pred_score.loc[mask]
+    total_after = len(filtered)
+    logger.info(f"不可交易标的过滤: {total_before} → {total_after} 条 (移除 {total_before - total_after})")
+    return filtered
+
+
 def build_strategy_config(config: Optional[dict] = None) -> Dict[str, Any]:
     """构建 TopkDropoutStrategy 的配置字典
 
@@ -88,6 +193,9 @@ def run_backtest(pred_score: pd.DataFrame, config: Optional[dict] = None) -> Dic
         pred_score_shifted = pred_score_shifted.set_index(pred_score.index.names)
     logger.info("signal 已滞后1天 (shift), 消除前视偏差")
 
+    # 过滤不可交易标的（停牌、ST、次新）
+    pred_score_shifted = _filter_untradable_stocks(pred_score_shifted)
+
     # 实例化 TopkDropoutStrategy
     strategy = TopkDropoutStrategy(
         signal=pred_score_shifted,
@@ -95,18 +203,11 @@ def run_backtest(pred_score: pd.DataFrame, config: Optional[dict] = None) -> Dic
         n_drop=st_config["n_drop"],
     )
 
-    # 合并 exchange_kwargs: 用 strategy_config 中的交易规则补充 backtest_config
+    # 合并 exchange_kwargs
     exchange_kwargs = dict(bt_config["exchange_kwargs"])
     trading_rules = st_config.get("trading_rules", {})
     if trading_rules.get("limit_up_filter"):
         exchange_kwargs.setdefault("limit_threshold", 0.099)
-    if trading_rules.get("st_filter") or trading_rules.get("suspend_filter"):
-        # Qlib Exchange 支持 trade_unit/deal_price 等，
-        # ST和停牌过滤需要通过 codes_filter 或 instruments 池在数据层实现
-        logger.warning(
-            "ST/停牌过滤需在 instruments 层实现（如自定义 filter_pipe），"
-            "exchange_kwargs 仅支持涨跌停阈值过滤"
-        )
 
     # 用 strategy_config 的成本覆盖 backtest_config（单一事实源）
     cost_config = st_config.get("cost", {})
@@ -322,6 +423,9 @@ def run_backtest_from_recorder(recorder) -> Dict:
         pred_shifted = pred_shifted.dropna(subset=[date_col])
         pred_shifted = pred_shifted.set_index(pred.index.names)
     logger.info("signal 已滞后1天 (shift), 消除前视偏差")
+
+    # 过滤不可交易标的（停牌、ST、次新）
+    pred_shifted = _filter_untradable_stocks(pred_shifted)
 
     strategy = TopkDropoutStrategy(
         signal=pred_shifted,

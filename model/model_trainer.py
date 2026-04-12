@@ -24,6 +24,10 @@ from factors.alpha158 import get_alpha158_handler_config, get_alpha158_with_cust
 from factors.custom_factors import get_custom_factor_expressions
 
 
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+
+
 MODEL_REGISTRY = {
     "lgbm": get_lgbm_model_config,
     "linear": get_linear_model_config,
@@ -140,3 +144,183 @@ def train_and_predict(
         logger.info(f"实验 ID: {recorder.info['id']}")
 
     return recorder
+
+
+def _generate_rolling_splits(data_config: dict) -> list:
+    """根据配置生成滚动时序切分方案
+
+    Returns:
+        [{"train": (start, end), "valid": (start, end), "test": (start, end)}, ...]
+    """
+    rolling_cfg = data_config.get("rolling", {})
+    n_splits = rolling_cfg.get("n_splits", 5)
+    train_years = rolling_cfg.get("train_years", 4)
+    valid_years = rolling_cfg.get("valid_years", 1)
+    test_years = rolling_cfg.get("test_years", 1)
+
+    total_start = datetime.strptime(data_config["split"]["train"]["start"], "%Y-%m-%d")
+    total_end = datetime.strptime(data_config["split"]["test"]["end"], "%Y-%m-%d")
+
+    window_years = train_years + valid_years + test_years
+    total_years = (total_end - total_start).days / 365.25
+    step_years = max(1, (total_years - window_years) / max(n_splits - 1, 1))
+
+    splits = []
+    for i in range(n_splits):
+        offset = relativedelta(months=int(step_years * 12 * i))
+        train_start = total_start + offset
+        train_end = train_start + relativedelta(years=train_years) - relativedelta(days=1)
+        valid_start = train_end + relativedelta(days=1)
+        valid_end = valid_start + relativedelta(years=valid_years) - relativedelta(days=1)
+        test_start = valid_end + relativedelta(days=1)
+        test_end = test_start + relativedelta(years=test_years) - relativedelta(days=1)
+
+        if test_end > total_end:
+            test_end = total_end
+        if test_start > total_end:
+            break
+
+        splits.append({
+            "train": (train_start.strftime("%Y-%m-%d"), train_end.strftime("%Y-%m-%d")),
+            "valid": (valid_start.strftime("%Y-%m-%d"), valid_end.strftime("%Y-%m-%d")),
+            "test": (test_start.strftime("%Y-%m-%d"), test_end.strftime("%Y-%m-%d")),
+        })
+
+    return splits
+
+
+def train_and_predict_rolling(
+    model_name: str = "lgbm",
+    use_custom_factors: bool = True,
+) -> dict:
+    """滚动时序验证：多折训练+预测，返回拼接后的 pred 和各折 IC
+
+    Returns:
+        {"all_preds": DataFrame, "fold_metrics": [...], "recorder": last_recorder}
+    """
+    import pandas as pd
+    from qlib.utils import init_instance_by_config
+    from qlib.workflow import R
+    from qlib.workflow.record_temp import SignalRecord, SigAnaRecord
+
+    d_config = get_data_config()
+    m_config = get_model_config()
+
+    splits = _generate_rolling_splits(d_config)
+    logger.info(f"滚动验证: {len(splits)} 折")
+    for i, s in enumerate(splits):
+        logger.info(f"  折{i+1}: train={s['train']}, valid={s['valid']}, test={s['test']}")
+
+    all_preds = []
+    fold_metrics = []
+    last_recorder = None
+
+    for i, split in enumerate(splits):
+        logger.info(f"{'='*60}")
+        logger.info(f"滚动验证 折{i+1}/{len(splits)}")
+        logger.info(f"{'='*60}")
+
+        label_expr = m_config["label"]["expression"]
+        custom_fields = get_custom_factor_expressions() if use_custom_factors else None
+
+        if custom_fields:
+            dataset_config = get_alpha158_with_custom_config(
+                instruments="csi300",
+                train_period=split["train"],
+                valid_period=split["valid"],
+                test_period=split["test"],
+                label_expr=label_expr,
+                custom_fields=custom_fields,
+            )
+        else:
+            dataset_config = get_alpha158_handler_config(
+                instruments="csi300",
+                train_period=split["train"],
+                valid_period=split["valid"],
+                test_period=split["test"],
+                label_expr=label_expr,
+            )
+
+        model_cfg = get_model_config_by_name(model_name, m_config)
+
+        logger.info(f"折{i+1}: 初始化数据集...")
+        dataset = init_instance_by_config(dataset_config)
+
+        logger.info(f"折{i+1}: 训练模型...")
+        model = init_instance_by_config(model_cfg)
+
+        with R.start(experiment_name=f"qlib_pipeline_{model_name}_rolling"):
+            R.log_params(
+                model=model_name, fold=i+1, n_folds=len(splits),
+                train=str(split["train"]), valid=str(split["valid"]),
+                test=str(split["test"]),
+            )
+            model.fit(dataset)
+
+            recorder = R.get_recorder()
+            sr = SignalRecord(model=model, dataset=dataset, recorder=recorder)
+            sr.generate()
+
+            sar = SigAnaRecord(ana_long_short=False, ann_scaler=252, recorder=recorder)
+            sar.generate()
+
+            pred = recorder.load_object("pred.pkl")
+            test_start = pd.Timestamp(split["test"][0])
+            test_end = pd.Timestamp(split["test"][1])
+            pred_test = pred.loc[
+                (pred.index.get_level_values(0) >= test_start) &
+                (pred.index.get_level_values(0) <= test_end)
+            ]
+            all_preds.append(pred_test)
+
+            ic_metrics = recorder.list_metrics()
+            fold_result = {
+                "fold": i + 1,
+                "test_period": f"{split['test'][0]}~{split['test'][1]}",
+                "ic_mean": ic_metrics.get("IC", 0),
+                "icir": ic_metrics.get("ICIR", 0),
+                "rank_ic": ic_metrics.get("Rank IC", 0),
+                "rank_icir": ic_metrics.get("Rank ICIR", 0),
+                "n_samples": len(pred_test),
+            }
+            fold_metrics.append(fold_result)
+            logger.info(
+                f"折{i+1} 结果: IC={fold_result['ic_mean']:.4f}, "
+                f"ICIR={fold_result['icir']:.4f}, 样本={fold_result['n_samples']}"
+            )
+            last_recorder = recorder
+
+    # 拼接所有折的 test 预测，去重（重叠区间保留后一折）
+    combined = pd.concat(all_preds)
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined = combined.sort_index()
+
+    # 将拼接后的 pred 保存到最后一个 recorder
+    if last_recorder is not None:
+        last_recorder.save_objects(**{"pred.pkl": combined})
+        logger.info(f"滚动验证完成: 合并 {len(combined)} 条预测")
+
+    # 输出各折 IC 汇总
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("滚动验证各折 IC 汇总:")
+    logger.info("=" * 70)
+    logger.info(f"{'折':>4s} {'测试区间':<24s} {'IC':>8s} {'ICIR':>8s} {'RankIC':>8s} {'样本':>8s}")
+    logger.info("-" * 70)
+    for fm in fold_metrics:
+        logger.info(
+            f"{fm['fold']:>4d} {fm['test_period']:<24s} "
+            f"{fm['ic_mean']:>8.4f} {fm['icir']:>8.4f} "
+            f"{fm['rank_ic']:>8.4f} {fm['n_samples']:>8d}"
+        )
+    avg_ic = sum(f["ic_mean"] for f in fold_metrics) / len(fold_metrics) if fold_metrics else 0
+    avg_icir = sum(f["icir"] for f in fold_metrics) / len(fold_metrics) if fold_metrics else 0
+    logger.info("-" * 70)
+    logger.info(f"{'平均':>4s} {'':24s} {avg_ic:>8.4f} {avg_icir:>8.4f}")
+    logger.info("")
+
+    return {
+        "all_preds": combined,
+        "fold_metrics": fold_metrics,
+        "recorder": last_recorder,
+    }

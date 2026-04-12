@@ -20,7 +20,7 @@ def get_alpha158_handler_config(
     train_period: Tuple[str, str] = ("2015-01-01", "2020-12-31"),
     valid_period: Tuple[str, str] = ("2021-01-01", "2022-12-31"),
     test_period: Tuple[str, str] = ("2023-01-01", "2026-04-12"),
-    label_expr: str = "Ref($close, -6)/Ref($close, -1) - 1",
+    label_expr: str = "Ref($close, -6)/Ref($open, -1) - 1",
     factor_config: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """纯 Alpha158 DatasetH 配置（158个因子）
@@ -65,7 +65,7 @@ def get_alpha158_with_custom_config(
     train_period: Tuple[str, str] = ("2015-01-01", "2020-12-31"),
     valid_period: Tuple[str, str] = ("2021-01-01", "2022-12-31"),
     test_period: Tuple[str, str] = ("2023-01-01", "2026-04-12"),
-    label_expr: str = "Ref($close, -6)/Ref($close, -1) - 1",
+    label_expr: str = "Ref($close, -6)/Ref($open, -1) - 1",
     custom_fields: Optional[List[Tuple[str, str]]] = None,
     factor_config: Optional[dict] = None,
 ) -> Dict[str, Any]:

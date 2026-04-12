@@ -85,7 +85,7 @@ def stage_model(args):
     logger.info("=" * 60)
 
     from data.data_loader import get_data_loader
-    from model.model_trainer import train_and_predict
+    from model.model_trainer import train_and_predict, train_and_predict_rolling
 
     # 初始化 Qlib
     loader = get_data_loader()
@@ -95,10 +95,18 @@ def stage_model(args):
     model_name = args.model or get_model_config().get("default", "lgbm")
     logger.info(f"使用模型: {model_name}")
 
-    recorder = train_and_predict(
-        model_name=model_name,
-        use_custom_factors=not args.no_custom_factors,
-    )
+    if getattr(args, "rolling", False):
+        logger.info("启用滚动时序验证模式")
+        rolling_result = train_and_predict_rolling(
+            model_name=model_name,
+            use_custom_factors=not args.no_custom_factors,
+        )
+        recorder = rolling_result["recorder"]
+    else:
+        recorder = train_and_predict(
+            model_name=model_name,
+            use_custom_factors=not args.no_custom_factors,
+        )
 
     logger.info("模型训练阶段完成")
     return recorder
@@ -225,13 +233,19 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
 
         # 用原始 label 重算 IC 作为独立校验（不受 CSRankNorm 影响）
         raw_ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
-        if raw_ic_series is not None and ic_summary is not None:
-            ic_summary["raw_ic_mean"] = float(raw_ic_series.mean())
-            # raw_rank_ic 需要用 Spearman 相关系数，这里 raw_ic_series 已是 Pearson IC
-            # 暂用 Pearson IC 近似，标注清楚避免误导
-            ic_summary["raw_rank_ic_mean"] = ic_summary["raw_ic_mean"]
-            logger.info(f"原始 label IC: {ic_summary['raw_ic_mean']:.4f} "
-                        f"(CSRankNorm IC: {ic_summary.get('ic_mean', 'N/A')})")
+        raw_rank_ic_series = load_ic_series_from_recorder(
+            recorder, use_raw_label=True, method="spearman",
+        )
+        if ic_summary is not None:
+            if raw_ic_series is not None:
+                ic_summary["raw_ic_mean"] = float(raw_ic_series.mean())
+            if raw_rank_ic_series is not None:
+                ic_summary["raw_rank_ic_mean"] = float(raw_rank_ic_series.mean())
+            logger.info(
+                f"原始 label Pearson IC: {ic_summary.get('raw_ic_mean', 'N/A')}, "
+                f"原始 label Rank IC (Spearman): {ic_summary.get('raw_rank_ic_mean', 'N/A')} "
+                f"(CSRankNorm IC: {ic_summary.get('ic_mean', 'N/A')})"
+            )
 
     # ── 从 Recorder 生成买卖信号 ───────────────────────────
     trade_signals = None
@@ -704,6 +718,8 @@ def main():
                         help="运行 TopK 参数敏感性分析 (多组 topk 值回测)")
     parser.add_argument("--regime", action="store_true",
                         help="运行市场环境过滤分析 (均线过滤降低回撤)")
+    parser.add_argument("--rolling", action="store_true",
+                        help="启用滚动时序验证（多折训练，检验模型稳定性）")
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="日志级别")

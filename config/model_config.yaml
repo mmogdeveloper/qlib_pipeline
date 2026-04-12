@@ -5,13 +5,13 @@ model:
 
   # 预测目标
   label:
-    # 未来5日持有收益: T+1收盘买入, T+6收盘卖出
-    # Ref($close, -1) = T+1收盘(买入价), Ref($close, -6) = T+6收盘(卖出价)
+    # 未来5日持有收益: T+1开盘买入, T+6收盘卖出
+    # Ref($open, -1) = T+1开盘(买入价, 与 backtest deal_price="open" 一致)
+    # Ref($close, -6) = T+6收盘(卖出价)
     # 重要: backtest 中 signal 必须滞后1天(shift), 确保 T 日信号在 T+1 才使用
-    # 否则模型在 T 日用了 T 日收盘价计算特征, 却在 T 日收盘成交 = 前视偏差
-    expression: "Ref($close, -6)/Ref($close, -1) - 1"
-    description: "未来5日收益率（T+1买入 T+6卖出, 需配合signal shift使用）"
-    name: "Ref($close, -6)/Ref($close, -1) - 1"
+    expression: "Ref($close, -6)/Ref($open, -1) - 1"
+    description: "未来5日收益率（T+1开盘买入 T+6收盘卖出, 与deal_price=open对齐）"
+    name: "Ref($close, -6)/Ref($open, -1) - 1"
 
   # LightGBM 模型
   lgbm:

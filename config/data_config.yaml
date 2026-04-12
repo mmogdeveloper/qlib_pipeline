@@ -52,6 +52,13 @@ data:
       start: "2023-01-01"
       end: "2026-04-12"
 
+  # 滚动验证配置
+  rolling:
+    n_splits: 5             # 滚动折数
+    train_years: 4          # 每折训练集长度（年）
+    valid_years: 1           # 每折验证集长度（年）
+    test_years: 1            # 每折测试集长度（年）
+
   # 数据健康检查
   health_check:
     max_price_change_pct: 20.0   # 价格最大涨跌幅告警阈值(%)
