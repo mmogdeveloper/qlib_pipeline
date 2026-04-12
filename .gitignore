@@ -21,9 +21,7 @@ mlruns/
 models/
 
 # Generated reports
-reports/figures/
-reports/*.html
-reports/*.csv
+reports/
 
 # Generated signals
 signal_gen/*.csv
