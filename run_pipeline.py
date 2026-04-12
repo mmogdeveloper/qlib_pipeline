@@ -101,6 +101,33 @@ def stage_model(args):
     return recorder
 
 
+def _get_recorder(args):
+    """从最近的实验加载 recorder"""
+    from qlib.workflow import R
+    exp_name = f"qlib_pipeline_{args.model or 'lgbm'}"
+    experiment = R.get_exp(experiment_name=exp_name)
+    recorders = experiment.list_recorders(rtype=experiment.RT_L)
+    if not recorders:
+        raise RuntimeError(f"实验 '{exp_name}' 中未找到记录，请先运行模型训练")
+    if isinstance(recorders, dict):
+        return recorders[list(recorders.keys())[0]]
+    finished = [r for r in recorders if r.info.get("status") == "FINISHED"]
+    return finished[-1] if finished else recorders[-1]
+
+
+def _apply_strategy_overrides(args):
+    """将 CLI 参数覆盖写入策略配置（运行时生效，不修改 YAML）"""
+    from utils.helpers import set_config_override
+
+    if args.rebalance:
+        set_config_override("strategy", {"rebalance": {"frequency": args.rebalance}})
+        logger.info(f"调仓频率覆盖为: {args.rebalance}")
+
+    if args.n_drop is not None:
+        set_config_override("strategy", {"n_drop": args.n_drop})
+        logger.info(f"n_drop 覆盖为: {args.n_drop}")
+
+
 def stage_backtest(args, recorder=None):
     """阶段4: 信号 → 回测"""
     logger.info("=" * 60)
@@ -113,20 +140,11 @@ def stage_backtest(args, recorder=None):
 
     from signal_gen.portfolio import run_backtest_from_recorder
 
+    # 应用 CLI 覆盖参数
+    _apply_strategy_overrides(args)
+
     if recorder is None:
-        # 从最近的实验加载
-        from qlib.workflow import R
-        exp_name = f"qlib_pipeline_{args.model or 'lgbm'}"
-        experiment = R.get_exp(experiment_name=exp_name)
-        recorders = experiment.list_recorders(rtype=experiment.RT_L)
-        if not recorders:
-            raise RuntimeError(f"实验 '{exp_name}' 中未找到记录，请先运行模型训练")
-        if isinstance(recorders, dict):
-            recorder = recorders[list(recorders.keys())[0]]
-        else:
-            # Pick latest FINISHED recorder
-            finished = [r for r in recorders if r.info.get("status") == "FINISHED"]
-            recorder = finished[-1] if finished else recorders[-1]
+        recorder = _get_recorder(args)
 
     result = run_backtest_from_recorder(recorder)
     logger.info("回测阶段完成")
@@ -206,9 +224,9 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
         raw_ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
         if raw_ic_series is not None and ic_summary is not None:
             ic_summary["raw_ic_mean"] = float(raw_ic_series.mean())
-            ic_summary["raw_rank_ic_mean"] = float(raw_ic_series.apply(
-                lambda x: x  # rank IC 需要单独计算，此处先用 Pearson IC
-            ).mean())
+            # raw_rank_ic 需要用 Spearman 相关系数，这里 raw_ic_series 已是 Pearson IC
+            # 暂用 Pearson IC 近似，标注清楚避免误导
+            ic_summary["raw_rank_ic_mean"] = ic_summary["raw_ic_mean"]
             logger.info(f"原始 label IC: {ic_summary['raw_ic_mean']:.4f} "
                         f"(CSRankNorm IC: {ic_summary.get('ic_mean', 'N/A')})")
 
@@ -239,6 +257,113 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
     return report_path
 
 
+def stage_sensitivity(args, recorder=None):
+    """成本敏感性分析: 用多组成本参数跑回测，观察收益衰减"""
+    logger.info("=" * 60)
+    logger.info("【成本敏感性分析】")
+    logger.info("=" * 60)
+
+    import pandas as pd
+    from data.data_loader import get_data_loader
+    from signal_gen.portfolio import run_backtest_from_recorder
+    from evaluation.metrics import compute_metrics_from_report
+    from utils.helpers import set_config_override, clear_config_overrides
+
+    get_data_loader().init_qlib()
+
+    _apply_strategy_overrides(args)
+
+    if recorder is None:
+        recorder = _get_recorder(args)
+
+    # 成本倍数: 0x (无成本), 0.5x, 1x (当前), 1.5x, 2x, 3x
+    cost_multipliers = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
+    base_st = get_strategy_config()
+    base_open = (base_st["cost"]["buy_commission"] + base_st["cost"]["buy_slippage"])
+    base_close = (base_st["cost"]["sell_commission"]
+                  + base_st["cost"]["stamp_tax"]
+                  + base_st["cost"]["sell_slippage"])
+
+    results = []
+    for mult in cost_multipliers:
+        label = f"{mult:.1f}x"
+        open_cost = base_open * mult
+        close_cost = base_close * mult
+        logger.info(f"--- 成本 {label}: open={open_cost:.6f}, close={close_cost:.6f} ---")
+
+        # 覆盖 backtest 的 exchange_kwargs 成本
+        set_config_override("backtest", {
+            "exchange_kwargs": {
+                "open_cost": open_cost,
+                "close_cost": close_cost,
+            }
+        })
+        # 同步覆盖 strategy cost（portfolio.py 用 strategy cost 计算）
+        set_config_override("strategy", {
+            "cost": {
+                "buy_commission": base_st["cost"]["buy_commission"] * mult,
+                "sell_commission": base_st["cost"]["sell_commission"] * mult,
+                "stamp_tax": base_st["cost"]["stamp_tax"] * mult,
+                "buy_slippage": base_st["cost"]["buy_slippage"] * mult,
+                "sell_slippage": base_st["cost"]["sell_slippage"] * mult,
+            }
+        })
+
+        try:
+            bt_result = run_backtest_from_recorder(recorder)
+            portfolio_metric = bt_result["portfolio_metric"]
+            if isinstance(portfolio_metric, tuple):
+                report_df = portfolio_metric[0]
+            else:
+                report_df = portfolio_metric
+
+            if report_df is not None and "return" in report_df.columns:
+                metrics = compute_metrics_from_report(report_df)
+                results.append({
+                    "cost_multiplier": label,
+                    "open_cost": open_cost,
+                    "close_cost": close_cost,
+                    "ann_return_with_cost": metrics.get("excess_return_with_cost/annualized_return", 0),
+                    "sharpe_with_cost": metrics.get("excess_return_with_cost/information_ratio", 0),
+                    "max_dd_with_cost": metrics.get("excess_return_with_cost/max_drawdown", 0),
+                    "ann_return_no_cost": metrics.get("excess_return_without_cost/annualized_return", 0),
+                    "sharpe_no_cost": metrics.get("excess_return_without_cost/information_ratio", 0),
+                })
+        except Exception as e:
+            logger.error(f"成本 {label} 回测失败: {e}")
+            results.append({"cost_multiplier": label, "error": str(e)})
+
+        # 清除覆盖，准备下一轮
+        clear_config_overrides("backtest")
+        clear_config_overrides("strategy")
+
+    # 输出敏感性分析结果
+    df = pd.DataFrame(results)
+    report_dir = ensure_dir(PROJECT_ROOT / "reports")
+    csv_path = report_dir / f"sensitivity_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    # 打印汇总表
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("成本敏感性分析结果:")
+    logger.info("=" * 70)
+    print(f"\n{'成本倍数':<10s} {'买入成本':>10s} {'卖出成本':>10s} "
+          f"{'超额年化':>10s} {'Sharpe':>8s} {'最大回撤':>10s}")
+    print("-" * 70)
+    for r in results:
+        if "error" in r:
+            print(f"{r['cost_multiplier']:<10s} {'ERROR':>10s}")
+            continue
+        print(f"{r['cost_multiplier']:<10s} {r['open_cost']:>10.6f} {r['close_cost']:>10.6f} "
+              f"{r['ann_return_with_cost']:>10.4f} {r['sharpe_with_cost']:>8.4f} "
+              f"{r['max_dd_with_cost']:>10.4f}")
+    print()
+
+    logger.info(f"敏感性分析 CSV 已保存: {csv_path}")
+    return csv_path
+
+
 def run_all(args):
     """运行全流水线"""
     logger.info("#" * 60)
@@ -260,6 +385,10 @@ def run_all(args):
     # 阶段5: 评估
     report = stage_evaluate(args, result, recorder)
 
+    # 可选: 成本敏感性分析
+    if args.sensitivity:
+        stage_sensitivity(args, recorder)
+
     logger.info("#" * 60)
     logger.info("# 全流水线运行完成!")
     logger.info(f"# 报告: {report}")
@@ -278,6 +407,9 @@ def main():
   python run_pipeline.py --stage backtest             # 仅回测
   python run_pipeline.py --stage evaluate             # 仅评估报告
   python run_pipeline.py --stage all --skip-data      # 跳过数据下载
+  python run_pipeline.py --stage sensitivity          # 单独运行成本敏感性分析
+  python run_pipeline.py --stage backtest --n-drop 2 --rebalance month  # 低换手率回测
+  python run_pipeline.py --stage all --skip-data --sensitivity  # 全流水线 + 敏感性分析
         """,
     )
 
@@ -285,7 +417,7 @@ def main():
         "--stage",
         type=str,
         default="all",
-        choices=["all", "data", "model", "backtest", "evaluate"],
+        choices=["all", "data", "model", "backtest", "evaluate", "sensitivity"],
         help="运行阶段 (default: all)",
     )
     parser.add_argument("--model", type=str, choices=["lgbm", "linear", "mlp"],
@@ -296,6 +428,12 @@ def main():
                         help="跳过数据下载阶段")
     parser.add_argument("--no-custom-factors", action="store_true",
                         help="不使用自定义因子，仅 Alpha158")
+    parser.add_argument("--rebalance", type=str, choices=["day", "week", "month"],
+                        help="覆盖调仓频率 (降低频率可减少换手率)")
+    parser.add_argument("--n-drop", type=int,
+                        help="覆盖每期最多换出股票数 (降低可减少换手率)")
+    parser.add_argument("--sensitivity", action="store_true",
+                        help="运行成本敏感性分析 (多组成本参数回测)")
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="日志级别")
@@ -313,6 +451,8 @@ def main():
         stage_backtest(args)
     elif args.stage == "evaluate":
         stage_evaluate(args)
+    elif args.stage == "sensitivity":
+        stage_sensitivity(args)
 
 
 if __name__ == "__main__":

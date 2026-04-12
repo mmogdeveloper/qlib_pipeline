@@ -54,15 +54,18 @@ def generate_text_report(
     lines.append("")
     lines.append("【核心指标】")
     lines.append("-" * 40)
-    for name, val in metrics.items():
+    # 按类别分组输出，优先展示含成本超额收益
+    _pct_keys = {"annualized_return", "max_drawdown", "mean", "std"}
+    for name, val in sorted(metrics.items()):
         if isinstance(val, float):
-            if "率" in name or "收益" in name or "CAGR" in name or "回撤" in name:
-                formatted = f"{val:.4%}"
+            metric_short = name.split("/")[-1] if "/" in name else name
+            if metric_short in _pct_keys:
+                formatted = f"{val:.6f}"
             else:
                 formatted = f"{val:.4f}"
         else:
             formatted = str(val)
-        lines.append(f"  {name:<20s} {formatted}")
+        lines.append(f"  {name:<45s} {formatted}")
 
     # ── IC 指标 ──
     if ic_summary:

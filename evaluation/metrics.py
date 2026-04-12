@@ -15,8 +15,12 @@ def compute_metrics_from_report(
 ) -> Dict[str, float]:
     """从 Qlib backtest_daily 返回的 report_df 计算全部指标
 
-    直接调用 qlib.contrib.evaluate.risk_analysis()，
-    它会计算：annualized_return, max_drawdown, sharpe, information_ratio 等。
+    调用 qlib.contrib.evaluate.risk_analysis() 分别计算：
+    - 含成本超额收益指标 (excess_return_with_cost)
+    - 不含成本超额收益指标 (excess_return_without_cost)
+
+    注意: Qlib 0.9.7 的 risk_analysis(r) 接受 pd.Series，不是 DataFrame。
+    必须从 report_df 中提取正确的收益率 Series 后再传入。
 
     Args:
         report_df: backtest_daily 返回的 report DataFrame
@@ -29,25 +33,51 @@ def compute_metrics_from_report(
 
     logger.info("使用 Qlib risk_analysis() 计算评估指标...")
 
-    # risk_analysis 接受 report_df 整体，自动提取 return/bench 列
-    # 返回 OrderedDict，包含子类别:
-    #   'excess_return_without_cost', 'excess_return_with_cost',
-    #   每个子类别包含: mean, std, annualized_return, max_drawdown, sharpe, information_ratio 等
-    analysis_result = risk_analysis(report_df)
+    # ── 校验 report_df 结构 ──────────────────────────────────
+    required_cols = {"return", "bench", "cost"}
+    missing = required_cols - set(report_df.columns)
+    if missing:
+        raise ValueError(
+            f"report_df 缺少必要列 {missing}，实际列: {list(report_df.columns)}。"
+            f"请检查 backtest_daily 返回结构。"
+        )
 
-    # 提取关键指标
+    # 日收益率合理性检查：A股单日涨跌幅上限 ±20%（含 ST/创业板等）
+    ret = report_df["return"]
+    if ret.abs().max() > 0.3:
+        logger.error(
+            f"日收益率异常: max={ret.max():.6f}, min={ret.min():.6f}。"
+            f"输入可能是资金量而非收益率。"
+        )
+
+    logger.info(
+        f"report_df 概览: {len(report_df)} 天, "
+        f"日均收益={ret.mean():.6f}, 日收益std={ret.std():.6f}"
+    )
+
+    # ── 计算各类指标 ─────────────────────────────────────────
+    # Qlib 0.9.7: risk_analysis(r) 接受 Series，返回 DataFrame(column='risk')
+    # 分别对三种收益率序列调用 risk_analysis
     metrics = {}
 
-    # 从 excess_return_with_cost 子字典提取（含交易成本的指标更有意义）
-    for category_name, category_df in analysis_result.items():
-        if hasattr(category_df, 'to_dict'):
-            for metric_name, value_series in category_df.items():
-                if hasattr(value_series, 'iloc'):
-                    val = value_series.iloc[0] if len(value_series) > 0 else value_series
-                else:
-                    val = value_series
-                key = f"{category_name}/{metric_name}"
-                metrics[key] = float(val) if pd.notna(val) else 0.0
+    # 1) 含成本超额收益 = return - bench（return 已扣成本? 否: return - cost - bench）
+    #    Qlib report_df 中 return 是扣成本前的收益率，cost 是成本率
+    excess_return_with_cost = report_df["return"] - report_df["cost"] - report_df["bench"]
+    analysis = risk_analysis(excess_return_with_cost)
+    for metric_name in analysis.index:
+        metrics[f"excess_return_with_cost/{metric_name}"] = float(analysis.loc[metric_name, "risk"])
+
+    # 2) 不含成本超额收益
+    excess_return_without_cost = report_df["return"] - report_df["bench"]
+    analysis = risk_analysis(excess_return_without_cost)
+    for metric_name in analysis.index:
+        metrics[f"excess_return_without_cost/{metric_name}"] = float(analysis.loc[metric_name, "risk"])
+
+    # 3) 策略绝对收益（含成本）
+    strategy_return = report_df["return"] - report_df["cost"]
+    analysis = risk_analysis(strategy_return)
+    for metric_name in analysis.index:
+        metrics[f"return_with_cost/{metric_name}"] = float(analysis.loc[metric_name, "risk"])
 
     # 日志输出关键指标
     for name, val in metrics.items():

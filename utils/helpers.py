@@ -16,6 +16,9 @@ from loguru import logger
 # ── 项目根目录 ──────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# ── 运行时配置覆盖（CLI 参数等）──────────────────────────────
+_config_overrides: Dict[str, Dict[str, Any]] = {}
+
 
 def load_config(config_name: str) -> Dict[str, Any]:
     """加载 YAML 配置文件
@@ -46,11 +49,41 @@ def get_model_config() -> Dict[str, Any]:
 
 
 def get_strategy_config() -> Dict[str, Any]:
-    return load_config("strategy_config.yaml")["strategy"]
+    config = load_config("strategy_config.yaml")["strategy"]
+    if "strategy" in _config_overrides:
+        _deep_update(config, _config_overrides["strategy"])
+    return config
 
 
 def get_backtest_config() -> Dict[str, Any]:
-    return load_config("backtest_config.yaml")["backtest"]
+    config = load_config("backtest_config.yaml")["backtest"]
+    if "backtest" in _config_overrides:
+        _deep_update(config, _config_overrides["backtest"])
+    return config
+
+
+def set_config_override(section: str, overrides: Dict[str, Any]):
+    """设置运行时配置覆盖（不修改 YAML 文件）"""
+    if section not in _config_overrides:
+        _config_overrides[section] = {}
+    _deep_update(_config_overrides[section], overrides)
+
+
+def clear_config_overrides(section: Optional[str] = None):
+    """清除运行时配置覆盖"""
+    if section:
+        _config_overrides.pop(section, None)
+    else:
+        _config_overrides.clear()
+
+
+def _deep_update(base: dict, updates: dict):
+    """递归更新字典"""
+    for k, v in updates.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_update(base[k], v)
+        else:
+            base[k] = v
 
 
 def expand_path(path_str: str) -> Path:
