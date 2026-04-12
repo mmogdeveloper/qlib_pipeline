@@ -1,0 +1,58 @@
+# 数据配置
+data:
+  # 数据区间
+  start_date: "2015-01-01"
+  end_date: "2026-04-12"
+
+  # 存储路径
+  raw_csv_dir: "~/.qlib/raw_data/akshare_csv"
+  qlib_data_dir: "~/.qlib/qlib_data/cn_data_akshare"
+
+  # 基准指数
+  benchmark_index: "000300"  # 沪深300
+  benchmark_symbol: "sh000300"
+
+  # 下载参数
+  download:
+    max_workers: 2          # 并发线程数
+    rate_limit_sleep: 1.5   # 每次请求间隔(秒)
+    max_retries: 5          # 最大重试次数
+    retry_base_delay: 5.0   # 重试基础延迟(秒)，指数退避
+
+  # 字段映射 (AKShare → Qlib)
+  # 同时包含中文和英文列名，兼容 AKShare 不同版本
+  field_mapping:
+    日期: date
+    开盘: open
+    最高: high
+    最低: low
+    收盘: close
+    成交量: volume
+    成交额: amount
+    换手率: turnover
+    # 英文列名兼容（部分 AKShare 版本返回英文）
+    "Date": date
+    "Open": open
+    "High": high
+    "Low": low
+    "Close": close
+    "Volume": volume
+    "Amount": amount
+    "Turnover": turnover
+
+  # 数据集划分
+  split:
+    train:
+      start: "2015-01-01"
+      end: "2020-12-31"
+    valid:
+      start: "2021-01-01"
+      end: "2022-12-31"
+    test:
+      start: "2023-01-01"
+      end: "2026-04-12"
+
+  # 数据健康检查
+  health_check:
+    max_price_change_pct: 20.0   # 价格最大涨跌幅告警阈值(%)
+    min_trading_days_pct: 80.0   # 最少交易日占比(%)

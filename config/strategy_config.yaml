@@ -1,0 +1,44 @@
+# 策略配置
+strategy:
+  # 选股策略
+  type: "topk_dropout"  # topk / topk_dropout
+
+  # TopK 参数
+  topk: 30              # 每期持仓股票数
+  n_drop: 5             # 每期最多换出股票数 (仅 topk_dropout)
+
+  # 组合权重
+  weighting: "equal"    # equal / score_weighted
+
+  # 调仓频率
+  rebalance:
+    frequency: "week"   # day / week / month
+    weekday: 4          # 周五(0=周一, 4=周五)，仅 week 模式
+
+  # A股交易规则
+  trading_rules:
+    # 涨跌停限制
+    limit_up_filter: true    # 涨停不买入
+    limit_down_filter: true  # 跌停不卖出
+
+    # ST股过滤
+    st_filter: true
+
+    # 新股过滤
+    ipo_filter:
+      enabled: true
+      days: 60  # 上市后60日内不交易
+
+    # 停牌处理
+    suspend_filter: true     # 停牌不交易
+
+  # 交易成本
+  cost:
+    buy_commission: 0.0003     # 买入佣金 万3
+    sell_commission: 0.0003    # 卖出佣金 万3
+    stamp_tax: 0.001           # 印花税 千1（仅卖出）
+    buy_slippage: 0.0002       # 买入滑点 万2
+    sell_slippage: 0.0002      # 卖出滑点 万2
+
+  # 初始资金
+  initial_cash: 10000000  # 1000万

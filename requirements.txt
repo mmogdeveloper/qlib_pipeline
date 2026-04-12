@@ -1,0 +1,26 @@
+# Qlib 核心
+pyqlib>=0.9.0
+
+# 数据源
+akshare>=1.12.0
+
+# 数据处理
+pandas>=1.5.0
+numpy>=1.23.0
+scipy>=1.9.0
+
+# 机器学习
+lightgbm>=3.3.0
+scikit-learn>=1.1.0
+
+# 深度学习（可选，MLP/ALSTM/Transformer 需要）
+# torch>=2.0.0
+
+# 可视化
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# 配置与工具
+pyyaml>=6.0
+tqdm>=4.64.0
+loguru>=0.7.0

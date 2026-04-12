@@ -1,0 +1,37 @@
+# 回测配置
+backtest:
+  # 回测区间（默认使用测试集区间）
+  start_date: "2023-01-01"
+  end_date: "2026-04-09"
+
+  # 基准
+  benchmark: "SH000300"
+
+  # 账户设置
+  account: 10000000        # 初始资金
+  exchange_kwargs:
+    limit_threshold: 0.099  # 涨跌停阈值
+    deal_price: "close"     # 成交价格
+    open_cost: 0.0005       # 买入成本 (佣金万3 + 滑点万2)
+    close_cost: 0.0015      # 卖出成本 (佣金万3 + 印花税千1 + 滑点万2)
+    min_cost: 5             # 最低佣金
+
+  # 评估指标
+  metrics:
+    - "annualized_return"
+    - "max_drawdown"
+    - "sharpe_ratio"
+    - "sortino_ratio"
+    - "calmar_ratio"
+    - "information_ratio"
+    - "win_rate"
+    - "ic"
+    - "rank_ic"
+    - "icir"
+    - "turnover"
+
+  # 报告输出
+  report:
+    output_dir: "reports"
+    format: "html"
+    include_plots: true

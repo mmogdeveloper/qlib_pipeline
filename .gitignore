@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Logs
+logs/
+*.log
+
+# Data (downloaded/generated)
+data/
+
+# MLflow
+mlruns/
+
+# Trained models
+models/
+
+# Generated reports
+reports/figures/
+reports/*.html
+reports/*.csv
+
+# Generated signals
+signal_gen/*.csv
+
+# Accidentally copied system paths
+Users/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.venv/
+venv/

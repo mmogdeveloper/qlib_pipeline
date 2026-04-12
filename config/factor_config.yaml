@@ -1,0 +1,62 @@
+# 因子配置
+factor:
+  # 基准因子集
+  use_alpha158: true
+
+  # 自定义因子
+  custom_factors:
+    momentum:
+      - name: "mom_5d"
+        expression: "$close/Ref($close,5)-1"
+        description: "5日动量"
+      - name: "mom_10d"
+        expression: "$close/Ref($close,10)-1"
+        description: "10日动量"
+      - name: "mom_20d"
+        expression: "$close/Ref($close,20)-1"
+        description: "20日动量"
+      - name: "mom_60d"
+        expression: "$close/Ref($close,60)-1"
+        description: "60日动量"
+
+    volatility:
+      - name: "vol_20d"
+        expression: "Std($close/Ref($close,1)-1, 20)"
+        description: "20日波动率"
+      - name: "vol_5d"
+        expression: "Std($close/Ref($close,1)-1, 5)"
+        description: "5日波动率"
+
+    turnover:
+      - name: "turnover_5d_mean"
+        expression: "Mean($turnover, 5)"
+        description: "5日平均换手率"
+      - name: "turnover_ratio"
+        expression: "$turnover/Mean($turnover,20)"
+        description: "换手率相对比"
+
+    price_volume:
+      - name: "corr_close_vol_20d"
+        expression: "Corr($close, $volume, 20)"
+        description: "20日量价相关系数"
+      - name: "corr_close_vol_10d"
+        expression: "Corr($close, $volume, 10)"
+        description: "10日量价相关系数"
+
+    liquidity:
+      - name: "vwap_ratio"
+        expression: "Mean($amount/$volume, 10)"
+        description: "10日均VWAP"
+
+  # 因子预处理
+  preprocessing:
+    fillna:
+      method: "ffill_then_median"  # 先前向填充，再截面中位数
+    winsorize:
+      method: "mad"
+      n_sigma: 3
+    normalize:
+      method: "zscore"  # 截面Z-score标准化
+    neutralize:
+      enabled: false  # 行业中性化开关
+      industry: "sw_level1"  # 申万一级行业
