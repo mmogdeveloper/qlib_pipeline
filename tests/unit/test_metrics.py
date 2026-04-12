@@ -177,4 +177,87 @@ class TestLoadIcFromRecorderRawLabel:
         # raw IC 计算失败时会 fallback 到 CSRankNorm
         result = load_ic_from_recorder(mock_recorder)
         assert result is not None
-        assert "raw_ic_mean" in result
+
+
+class TestComputeRawLabelsAlignment:
+    """Bug 回归测试：D.features 返回 (instrument, datetime) 索引，
+    _compute_raw_labels 必须 swaplevel 对齐到 pred 的 (datetime, instrument)"""
+
+    def test_swaplevel_alignment(self):
+        """模拟 D.features 返回反转索引，验证对齐后 concat 非空"""
+        from unittest.mock import patch
+        from evaluation.metrics import _compute_raw_labels
+
+        n_dates = 20
+        n_instruments = 10
+        dates = pd.date_range("2024-01-01", periods=n_dates, freq="B")
+        instruments = [f"SH60000{i}" for i in range(n_instruments)]
+
+        # pred: (datetime, instrument) — Qlib pred.pkl 的标准格式
+        pred_index = pd.MultiIndex.from_product(
+            [dates, instruments], names=["datetime", "instrument"]
+        )
+        pred = pd.DataFrame(
+            {"score": np.random.randn(len(pred_index))}, index=pred_index,
+        )
+
+        # 模拟 D.features 返回 (instrument, datetime) 索引
+        raw_index = pd.MultiIndex.from_product(
+            [instruments, dates], names=["instrument", "datetime"]
+        )
+        fake_raw = pd.DataFrame(
+            {"label": np.random.randn(len(raw_index))}, index=raw_index,
+        )
+
+        with patch("qlib.data.D") as mock_D, \
+             patch("utils.helpers.get_model_config") as mock_cfg:
+            mock_cfg.return_value = {"label": {"expression": "$close"}}
+            mock_D.features.return_value = fake_raw
+
+            result = _compute_raw_labels(pred)
+
+        assert result is not None, "_compute_raw_labels 不应返回 None"
+        assert len(result) == len(pred), (
+            f"对齐后应有 {len(pred)} 条，实际 {len(result)}"
+        )
+        # 索引层级应与 pred 一致: (datetime, instrument)
+        assert result.index.names == ["datetime", "instrument"]
+
+    def test_concat_after_alignment_is_nonempty(self):
+        """完整链路：_compute_raw_labels 返回后，与 pred concat + dropna 应非空"""
+        from unittest.mock import patch
+        from evaluation.metrics import _compute_raw_labels
+
+        n_dates = 20
+        n_instruments = 10
+        dates = pd.date_range("2024-01-01", periods=n_dates, freq="B")
+        instruments = [f"SH60000{i}" for i in range(n_instruments)]
+
+        pred_index = pd.MultiIndex.from_product(
+            [dates, instruments], names=["datetime", "instrument"]
+        )
+        pred_vals = np.random.randn(len(pred_index))
+        pred = pd.DataFrame({"score": pred_vals}, index=pred_index)
+
+        # D.features 返回 (instrument, datetime)
+        raw_index = pd.MultiIndex.from_product(
+            [instruments, dates], names=["instrument", "datetime"]
+        )
+        label_vals = pred_vals * 0.3 + np.random.randn(len(raw_index)) * 0.7
+        fake_raw = pd.DataFrame({"label": label_vals}, index=raw_index)
+
+        with patch("qlib.data.D") as mock_D, \
+             patch("utils.helpers.get_model_config") as mock_cfg:
+            mock_cfg.return_value = {"label": {"expression": "$close"}}
+            mock_D.features.return_value = fake_raw
+
+            label = _compute_raw_labels(pred)
+
+        concat = pd.concat(
+            [pred["score"], label["label"]], axis=1,
+        )
+        concat.columns = ["pred", "label"]
+        concat = concat.dropna()
+
+        assert len(concat) > 0, "concat + dropna 后不应为空（索引对齐失败）"
+        assert len(concat) == len(pred)

@@ -304,3 +304,93 @@ class TestExtractTradeRecords:
 
         df = extract_trade_records({})
         assert df.empty
+
+
+class TestFilterUntradableStocksAlignment:
+    """Bug 回归测试：D.features 返回 (instrument, datetime) 索引，
+    _filter_untradable_stocks 必须 swaplevel 对齐到 pred_score 的 (datetime, instrument)"""
+
+    def test_suspend_filter_removes_records(self):
+        """停牌过滤：D.features 返回反转索引时，仍应正确过滤 volume=0 的记录"""
+        from signal_gen.portfolio import _filter_untradable_stocks
+
+        n_dates = 20
+        n_instruments = 10
+        dates = make_trading_dates(n_dates)
+        instruments = make_instruments(n_instruments)
+
+        # pred_score: (datetime, instrument)
+        pred_index = pd.MultiIndex.from_product(
+            [dates, instruments], names=["datetime", "instrument"]
+        )
+        pred_score = pd.DataFrame(
+            {"score": np.random.randn(len(pred_index))}, index=pred_index,
+        )
+
+        # D.features 返回 (instrument, datetime)，模拟部分停牌
+        raw_index = pd.MultiIndex.from_product(
+            [instruments, dates], names=["instrument", "datetime"]
+        )
+        volumes = np.random.uniform(100000, 1000000, len(raw_index))
+        # 让前 2 个 instrument 在前 5 天停牌 (volume=0)
+        n_suspended = 2 * 5
+        for i, inst in enumerate(instruments[:2]):
+            for j, dt in enumerate(dates[:5]):
+                idx = i * n_dates + j
+                volumes[idx] = 0.0
+        volume_df = pd.DataFrame({"$volume": volumes}, index=raw_index)
+
+        with patch("qlib.data.D") as mock_D, \
+             patch("signal_gen.portfolio.get_strategy_config") as mock_cfg:
+            mock_cfg.return_value = {
+                "trading_rules": {
+                    "suspend_filter": True,
+                    "st_filter": False,
+                    "ipo_filter": {"enabled": False},
+                },
+            }
+            mock_D.features.return_value = volume_df
+
+            filtered = _filter_untradable_stocks(pred_score)
+
+        removed = len(pred_score) - len(filtered)
+        assert removed == n_suspended, (
+            f"应移除 {n_suspended} 条停牌记录，实际移除 {removed}"
+        )
+
+    def test_filter_with_reversed_index_not_zero(self):
+        """即使 D.features 返回 (instrument, datetime)，过滤数不应为 0"""
+        from signal_gen.portfolio import _filter_untradable_stocks
+
+        dates = make_trading_dates(10)
+        instruments = make_instruments(5)
+
+        pred_index = pd.MultiIndex.from_product(
+            [dates, instruments], names=["datetime", "instrument"]
+        )
+        pred_score = pd.DataFrame(
+            {"score": np.random.randn(len(pred_index))}, index=pred_index,
+        )
+
+        # 全部 volume=0（全部停牌）
+        raw_index = pd.MultiIndex.from_product(
+            [instruments, dates], names=["instrument", "datetime"]
+        )
+        volume_df = pd.DataFrame(
+            {"$volume": np.zeros(len(raw_index))}, index=raw_index,
+        )
+
+        with patch("qlib.data.D") as mock_D, \
+             patch("signal_gen.portfolio.get_strategy_config") as mock_cfg:
+            mock_cfg.return_value = {
+                "trading_rules": {
+                    "suspend_filter": True,
+                    "st_filter": False,
+                    "ipo_filter": {"enabled": False},
+                },
+            }
+            mock_D.features.return_value = volume_df
+
+            filtered = _filter_untradable_stocks(pred_score)
+
+        assert len(filtered) == 0, "全部停牌时过滤后应为空"

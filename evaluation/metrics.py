@@ -270,6 +270,20 @@ def _compute_raw_labels(pred: pd.DataFrame) -> Optional[pd.Series]:
         )
         if raw_label is not None and not raw_label.empty:
             raw_label.columns = ["label"]
+            logger.debug(f"D.features 返回: shape={raw_label.shape}, "
+                         f"index.names={raw_label.index.names}")
+
+            # D.features 返回 (instrument, datetime)，pred 是 (datetime, instrument)
+            # 统一为 pred 的索引层级顺序
+            if (isinstance(raw_label.index, pd.MultiIndex)
+                    and list(raw_label.index.names) != list(pred.index.names)):
+                raw_label = raw_label.swaplevel(0, 1).sort_index()
+                logger.debug(f"swaplevel 后: index.names={raw_label.index.names}")
+
+            # 用 reindex 显式对齐到 pred 的索引
+            raw_label = raw_label.reindex(pred.index)
+            n_valid = raw_label["label"].notna().sum()
+            logger.debug(f"reindex 对齐后: {n_valid}/{len(pred)} 条非空")
             return raw_label
     except Exception as e:
         logger.debug(f"计算原始 label 失败: {e}")

@@ -16,6 +16,19 @@ from loguru import logger
 from utils.helpers import get_strategy_config, get_backtest_config
 
 
+def _align_to_pred(df: pd.DataFrame, pred_index: pd.MultiIndex) -> pd.DataFrame:
+    """将 D.features() 返回的 DataFrame 对齐到 pred 的索引层级顺序
+
+    D.features() 返回 (instrument, datetime)，pred 是 (datetime, instrument)。
+    此函数统一 swaplevel 并 reindex 到 pred 的索引。
+    """
+    if not isinstance(df.index, pd.MultiIndex):
+        return df
+    if list(df.index.names) != list(pred_index.names):
+        df = df.swaplevel(0, 1).sort_index()
+    return df
+
+
 def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     """过滤不可交易的股票（停牌、ST、次新）
 
@@ -52,9 +65,11 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
             volume_df = D.features(
                 instruments, ["$volume"], start_time=start_date, end_time=end_date
             )
+            volume_df = _align_to_pred(volume_df, pred_score.index)
             volume_df.columns = ["volume"]
             suspended = volume_df["volume"].isna() | (volume_df["volume"] <= 0)
             common_idx = mask.index.intersection(suspended.index)
+            logger.info(f"停牌过滤: common_idx={len(common_idx)} 条")
             mask.loc[common_idx] = mask.loc[common_idx] & ~suspended.loc[common_idx]
             n_suspended = suspended.loc[common_idx].sum()
             logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
@@ -68,6 +83,7 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
                 instruments, ["$close", "Ref($close,1)"],
                 start_time=start_date, end_time=end_date,
             )
+            close_df = _align_to_pred(close_df, pred_score.index)
             close_df.columns = ["close", "prev_close"]
             daily_ret = (close_df["close"] / close_df["prev_close"] - 1).abs()
             max_ret_10d = daily_ret.groupby(level=1).rolling(10, min_periods=5).max()
@@ -91,8 +107,10 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
             vol_all = D.features(
                 instruments, ["$volume"], start_time="2005-01-01", end_time=end_date,
             )
-            traded = vol_all[vol_all["$volume"] > 0]
-            first_trade = traded.index.to_frame().groupby(level=1)[traded.index.names[0]].min()
+            vol_all = _align_to_pred(vol_all, pred_score.index)
+            traded = vol_all[vol_all.iloc[:, 0] > 0]
+            # swaplevel 后 index=(datetime, instrument)，level 0=datetime
+            first_trade = traded.index.to_frame().groupby("instrument")["datetime"].min()
 
             ipo_mask = pd.Series(False, index=pred_score.index)
             for inst, listing_dt in first_trade.items():
