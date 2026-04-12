@@ -154,8 +154,7 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
         load_ic_from_recorder,
         load_ic_series_from_recorder,
     )
-    from evaluation.visualization import Visualizer
-    from evaluation.report import generate_html_report
+    from evaluation.report import generate_text_report
 
     # ── 从 backtest_result 提取 report_df 和 positions ───────
     report_df = None
@@ -229,16 +228,9 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
         except Exception as e:
             logger.warning(f"生成买卖信号失败: {e}")
 
-    # ── 可视化（Qlib 内置 + 自定义补充）──────────────────────
-    viz = Visualizer()
-    plots = viz.generate_all_plots(
-        report_df=report_df,
-        recorder=recorder,
-    )
-
-    # 生成 HTML 报告
-    report_path = generate_html_report(
-        metrics, plots, ic_summary,
+    # ── 生成文本报告 ──────────────────────────────────────
+    report_path = generate_text_report(
+        metrics, ic_summary=ic_summary,
         trade_records=trade_records,
         trade_signals=trade_signals,
     )

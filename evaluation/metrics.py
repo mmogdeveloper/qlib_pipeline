@@ -163,8 +163,10 @@ def load_ic_series_from_recorder(recorder, use_raw_label: bool = False) -> Optio
             lambda x: x["pred"].corr(x["label"])
         )
         label_type = "原始" if use_raw_label else "CSRankNorm"
+        ic_mean = ic.mean()
         logger.info(f"IC 时间序列已计算({label_type} label): {len(ic)} 个交易日, "
-                     f"IC均值={ic.mean():.4f}")
+                     f"IC均值={ic_mean:.4f}" if not pd.isna(ic_mean) else
+                     f"IC 时间序列已计算({label_type} label): {len(ic)} 个交易日, IC均值=NaN")
         return ic
     except Exception as e:
         logger.warning(f"计算 IC 时间序列失败: {e}")
