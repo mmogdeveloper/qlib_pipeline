@@ -73,22 +73,60 @@ def run_backtest(pred_score: pd.DataFrame, config: Optional[dict] = None) -> Dic
     logger.info(f"  初始资金: {bt_config['account']:,.0f}")
     logger.info(f"  基准: {bt_config['benchmark']}")
 
+    # 将 signal 滞后1天，避免前视偏差:
+    # 模型在 T 日用 T 日收盘数据生成 signal[T]，
+    # shift 后 signal[T] 变成 signal[T+1]，即 T+1 日才使用该信号交易
+    pred_score_shifted = pred_score.copy()
+    if isinstance(pred_score_shifted.index, pd.MultiIndex):
+        # MultiIndex=(datetime, instrument): 对 datetime 层 shift
+        pred_score_shifted = pred_score_shifted.reset_index()
+        date_col = pred_score_shifted.columns[0]  # datetime
+        dates = sorted(pred_score_shifted[date_col].unique())
+        date_map = dict(zip(dates[:-1], dates[1:]))  # T → T+1
+        pred_score_shifted[date_col] = pred_score_shifted[date_col].map(date_map)
+        pred_score_shifted = pred_score_shifted.dropna(subset=[date_col])
+        pred_score_shifted = pred_score_shifted.set_index(pred_score.index.names)
+    logger.info("signal 已滞后1天 (shift), 消除前视偏差")
+
     # 实例化 TopkDropoutStrategy
     strategy = TopkDropoutStrategy(
-        signal=pred_score,
+        signal=pred_score_shifted,
         topk=st_config["topk"],
         n_drop=st_config["n_drop"],
     )
 
+    # 合并 exchange_kwargs: 用 strategy_config 中的交易规则补充 backtest_config
+    exchange_kwargs = dict(bt_config["exchange_kwargs"])
+    trading_rules = st_config.get("trading_rules", {})
+    if trading_rules.get("limit_up_filter"):
+        exchange_kwargs.setdefault("limit_threshold", 0.099)
+    if trading_rules.get("st_filter") or trading_rules.get("suspend_filter"):
+        # Qlib Exchange 支持 trade_unit/deal_price 等，
+        # ST和停牌过滤需要通过 codes_filter 或 instruments 池在数据层实现
+        logger.warning(
+            "ST/停牌过滤需在 instruments 层实现（如自定义 filter_pipe），"
+            "exchange_kwargs 仅支持涨跌停阈值过滤"
+        )
+
+    # 用 strategy_config 的成本覆盖 backtest_config（单一事实源）
+    cost_config = st_config.get("cost", {})
+    if cost_config:
+        open_cost = cost_config.get("buy_commission", 0.0003) + cost_config.get("buy_slippage", 0.0002)
+        close_cost = (cost_config.get("sell_commission", 0.0003)
+                      + cost_config.get("stamp_tax", 0.001)
+                      + cost_config.get("sell_slippage", 0.0002))
+        exchange_kwargs["open_cost"] = open_cost
+        exchange_kwargs["close_cost"] = close_cost
+        logger.info(f"交易成本(来自strategy_config): 买入={open_cost:.4f}, 卖出={close_cost:.4f}")
+
     # 执行回测
-    # exchange_kwargs 控制交易规则：涨跌停阈值、成交价、交易成本等
     portfolio_metric, indicator = backtest_daily(
         start_time=bt_config["start_date"],
         end_time=bt_config["end_date"],
         strategy=strategy,
         account=bt_config["account"],
         benchmark=bt_config["benchmark"],
-        exchange_kwargs=bt_config["exchange_kwargs"],
+        exchange_kwargs=exchange_kwargs,
     )
 
     logger.info("回测执行完成")
@@ -169,22 +207,29 @@ def extract_trade_records(positions: dict) -> pd.DataFrame:
                         if inst == "cash":
                             continue
                         if isinstance(info, dict):
-                            prev_holdings[inst] = info.get("amount", 0)
+                            prev_holdings[inst] = {
+                                "amount": info.get("amount", 0),
+                                "price": info.get("price", 0),
+                            }
                 elif hasattr(prev_pos, "keys"):
                     for inst in prev_pos.keys():
                         if inst == "cash":
                             continue
                         info = prev_pos[inst]
                         if isinstance(info, dict):
-                            prev_holdings[inst] = info.get("amount", 0)
+                            prev_holdings[inst] = {
+                                "amount": info.get("amount", 0),
+                                "price": info.get("price", 0),
+                            }
             except Exception:
                 pass
 
             all_instruments = set(current_holdings.keys()) | set(prev_holdings.keys())
             for inst in all_instruments:
                 cur_amt = current_holdings.get(inst, {}).get("amount", 0)
-                prev_amt = prev_holdings.get(inst, 0)
+                prev_amt = prev_holdings.get(inst, {}).get("amount", 0)
                 cur_price = current_holdings.get(inst, {}).get("price", 0)
+                prev_price = prev_holdings.get(inst, {}).get("price", 0)
                 diff = cur_amt - prev_amt
 
                 if abs(diff) < 1e-6:
@@ -200,8 +245,8 @@ def extract_trade_records(positions: dict) -> pd.DataFrame:
                         "value": diff * cur_price,
                     })
                 else:
-                    # 卖出时用前一日价格估算（实际成交价可能不同）
-                    sell_price = cur_price if cur_price > 0 else 0
+                    # 卖出/清仓: 用前一日价格估算（清仓时 cur_price=0）
+                    sell_price = prev_price if prev_price > 0 else cur_price
                     records.append({
                         "date": date,
                         "instrument": inst,
@@ -266,8 +311,20 @@ def run_backtest_from_recorder(recorder) -> Dict:
     logger.info(f"从 Recorder 加载预测信号: {pred.shape}")
     logger.info("开始回测...")
 
+    # 将 signal 滞后1天，避免前视偏差
+    pred_shifted = pred.copy()
+    if isinstance(pred_shifted.index, pd.MultiIndex):
+        pred_shifted = pred_shifted.reset_index()
+        date_col = pred_shifted.columns[0]
+        dates = sorted(pred_shifted[date_col].unique())
+        date_map = dict(zip(dates[:-1], dates[1:]))
+        pred_shifted[date_col] = pred_shifted[date_col].map(date_map)
+        pred_shifted = pred_shifted.dropna(subset=[date_col])
+        pred_shifted = pred_shifted.set_index(pred.index.names)
+    logger.info("signal 已滞后1天 (shift), 消除前视偏差")
+
     strategy = TopkDropoutStrategy(
-        signal=pred,
+        signal=pred_shifted,
         topk=st_config["topk"],
         n_drop=st_config["n_drop"],
     )
@@ -278,13 +335,24 @@ def run_backtest_from_recorder(recorder) -> Dict:
     )
     benchmark = bench_returns if bench_returns is not None else bt_config["benchmark"]
 
+    # 合并交易成本: strategy_config 为单一事实源
+    exchange_kwargs = dict(bt_config["exchange_kwargs"])
+    cost_config = st_config.get("cost", {})
+    if cost_config:
+        open_cost = cost_config.get("buy_commission", 0.0003) + cost_config.get("buy_slippage", 0.0002)
+        close_cost = (cost_config.get("sell_commission", 0.0003)
+                      + cost_config.get("stamp_tax", 0.001)
+                      + cost_config.get("sell_slippage", 0.0002))
+        exchange_kwargs["open_cost"] = open_cost
+        exchange_kwargs["close_cost"] = close_cost
+
     portfolio_metric, indicator = backtest_daily(
         start_time=bt_config["start_date"],
         end_time=bt_config["end_date"],
         strategy=strategy,
         account=bt_config["account"],
         benchmark=benchmark,
-        exchange_kwargs=bt_config["exchange_kwargs"],
+        exchange_kwargs=exchange_kwargs,
     )
 
     logger.info("回测完成")

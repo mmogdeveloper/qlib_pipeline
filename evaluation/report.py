@@ -3,7 +3,6 @@ HTML 报告生成器
 汇总指标表格和图表，生成完整的回测报告
 """
 
-import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -13,10 +12,17 @@ from loguru import logger
 from utils.helpers import ensure_dir, PROJECT_ROOT
 
 
-def _img_to_base64(img_path: str) -> str:
-    """将图片转为 base64 编码"""
-    with open(img_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+def _img_to_relative_path(img_path: str, report_dir: Path) -> str:
+    """将图片路径转为相对于报告目录的路径"""
+    try:
+        return str(Path(img_path).relative_to(report_dir))
+    except ValueError:
+        # 不在同一目录树下，复制到 figures/ 子目录
+        import shutil
+        figures_dir = ensure_dir(report_dir / "figures")
+        dest = figures_dir / Path(img_path).name
+        shutil.copy2(img_path, dest)
+        return str(dest.relative_to(report_dir))
 
 
 def generate_html_report(
@@ -68,18 +74,18 @@ def generate_html_report(
         for name, val in ic_summary.items():
             ic_rows += f"<tr><td>{name}</td><td>{val:.4f}</td></tr>\n"
 
-    # 图表
+    # 图表: 使用相对路径引用，避免 base64 嵌入导致 HTML 文件过大
     images_html = ""
     for name, path in plots.items():
         try:
-            b64 = _img_to_base64(path)
+            rel_path = _img_to_relative_path(path, out_dir)
             images_html += f"""
             <div class="chart">
-                <img src="data:image/png;base64,{b64}" alt="{name}">
+                <img src="{rel_path}" alt="{name}">
             </div>
             """
         except Exception as e:
-            logger.warning(f"图表 {name} 嵌入失败: {e}")
+            logger.warning(f"图表 {name} 引用失败: {e}")
 
     # 交易记录表格
     trades_html = ""

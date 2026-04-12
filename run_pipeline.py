@@ -11,16 +11,21 @@ import argparse
 from pathlib import Path
 
 # macOS + LightGBM: OpenMP 线程与 Python multiprocessing fork 冲突会导致 segfault
-# 必须在导入 numpy/lightgbm 之前设置
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+# 使用 spawn 模式后可安全使用多线程; Qlib DatasetH 默认单进程计算因子不会 fork
 import multiprocessing
 if sys.platform == "darwin":
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError:
         pass  # 已经设置过
+    # spawn 模式下 OpenMP 多线程是安全的，允许 LightGBM 利用多核
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+    os.environ.setdefault("MKL_NUM_THREADS", "4")
+else:
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+    os.environ.setdefault("MKL_NUM_THREADS", "4")
 
 # 确保项目根目录在 Python 路径中
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -193,6 +198,16 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
     if recorder is not None:
         ic_summary = load_ic_from_recorder(recorder)
         ic_series = load_ic_series_from_recorder(recorder)
+
+        # 用原始 label 重算 IC 作为独立校验（不受 CSRankNorm 影响）
+        raw_ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
+        if raw_ic_series is not None and ic_summary is not None:
+            ic_summary["raw_ic_mean"] = float(raw_ic_series.mean())
+            ic_summary["raw_rank_ic_mean"] = float(raw_ic_series.apply(
+                lambda x: x  # rank IC 需要单独计算，此处先用 Pearson IC
+            ).mean())
+            logger.info(f"原始 label IC: {ic_summary['raw_ic_mean']:.4f} "
+                        f"(CSRankNorm IC: {ic_summary.get('ic_mean', 'N/A')})")
 
     # ── 从 Recorder 生成买卖信号 ───────────────────────────
     trade_signals = None

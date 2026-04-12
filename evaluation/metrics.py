@@ -123,22 +123,32 @@ def load_ic_from_recorder(recorder) -> Dict:
     return None
 
 
-def load_ic_series_from_recorder(recorder) -> Optional[pd.Series]:
+def load_ic_series_from_recorder(recorder, use_raw_label: bool = False) -> Optional[pd.Series]:
     """从 Recorder 加载 IC 时间序列（用于可视化）
-
-    SigAnaRecord 保存了 pred.pkl 和 label.pkl，
-    可以用来计算每日 IC 序列。
 
     Args:
         recorder: Qlib Recorder 对象
+        use_raw_label: 若 True，用原始收益率而非 CSRankNorm 后的 label 计算 IC
+                       这提供了一个不受 label 预处理影响的独立 IC 校验
 
     Returns:
         IC 时间序列 Series，失败返回 None
     """
     try:
         pred = recorder.load_object("pred.pkl")
-        label = recorder.load_object("label.pkl")
-        if pred is None or label is None:
+        if pred is None:
+            return None
+
+        if use_raw_label:
+            # 用原始 label（未经 CSRankNorm）重新计算 IC，作为独立校验
+            label = _compute_raw_labels(pred)
+            if label is None:
+                logger.warning("无法计算原始 label，回退到 label.pkl")
+                label = recorder.load_object("label.pkl")
+        else:
+            label = recorder.load_object("label.pkl")
+
+        if label is None:
             return None
 
         concat = pd.concat(
@@ -152,8 +162,44 @@ def load_ic_series_from_recorder(recorder) -> Optional[pd.Series]:
         ic = concat.groupby(level=0).apply(
             lambda x: x["pred"].corr(x["label"])
         )
-        logger.info(f"IC 时间序列已计算: {len(ic)} 个交易日")
+        label_type = "原始" if use_raw_label else "CSRankNorm"
+        logger.info(f"IC 时间序列已计算({label_type} label): {len(ic)} 个交易日, "
+                     f"IC均值={ic.mean():.4f}")
         return ic
     except Exception as e:
         logger.warning(f"计算 IC 时间序列失败: {e}")
         return None
+
+
+def _compute_raw_labels(pred: pd.DataFrame) -> Optional[pd.Series]:
+    """从 Qlib 数据源重新计算原始 label（未经 CSRankNorm）
+
+    用于独立校验 IC，避免 CSRankNorm 对 IC 的放大效应。
+    """
+    try:
+        import qlib
+        from qlib.data import D
+        from utils.helpers import get_model_config
+
+        m_config = get_model_config()
+        label_expr = m_config["label"]["expression"]
+
+        # 从 pred 的 index 提取 instruments 和时间范围
+        dates = pred.index.get_level_values(0)
+        instruments = pred.index.get_level_values(1).unique().tolist()
+        start = dates.min()
+        end = dates.max()
+
+        # 直接从 Qlib 数据源计算原始 label
+        raw_label = D.features(
+            instruments=instruments,
+            fields=[label_expr],
+            start_time=start,
+            end_time=end,
+        )
+        if raw_label is not None and not raw_label.empty:
+            raw_label.columns = ["label"]
+            return raw_label
+    except Exception as e:
+        logger.debug(f"计算原始 label 失败: {e}")
+    return None

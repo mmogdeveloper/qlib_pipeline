@@ -151,8 +151,11 @@ class Visualizer:
 
     def plot_excess_return(self, returns: pd.Series, benchmark_returns: pd.Series) -> str:
         """累计超额收益曲线（Qlib 不提供独立的超额收益图）"""
-        excess = returns - benchmark_returns
-        cum_excess = (1 + excess).cumprod() - 1
+        # 正确的累计超额收益: 策略累计净值 / 基准累计净值 - 1
+        # 错误做法: (1 + (r - b)).cumprod() 会因几何累乘造成数值爆炸
+        cum_strategy = (1 + returns).cumprod()
+        cum_bench = (1 + benchmark_returns).cumprod()
+        cum_excess = cum_strategy / cum_bench - 1
 
         fig, ax = plt.subplots(figsize=(14, 5))
         ax.plot(cum_excess.index, cum_excess.values, color="green", linewidth=1.5)
