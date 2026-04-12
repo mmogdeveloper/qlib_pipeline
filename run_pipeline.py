@@ -64,11 +64,14 @@ def stage_data(args):
     else:
         collector.download_all()
 
+    # 下载历史成分股快照（消除幸存者偏差）
+    collector.download_constituent_history()
+
     # 健康检查
     checker = DataHealthChecker(config)
     checker.run_full_check()
 
-    # 转换
+    # 转换（会自动检测历史成分股数据并生成动态 instruments）
     converter = CsvToQlib(config)
     converter.convert_all()
 

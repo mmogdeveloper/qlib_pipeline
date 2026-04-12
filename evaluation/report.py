@@ -72,8 +72,32 @@ def generate_text_report(
         lines.append("")
         lines.append("【因子 IC 指标】")
         lines.append("-" * 40)
+
+        # 区分 CSRankNorm IC 和原始 IC
+        norm_keys = ["ic_mean", "icir", "rank_ic_mean", "rank_icir"]
+        raw_keys = ["raw_ic_mean", "raw_rank_ic_mean"]
+        has_raw = any(k in ic_summary for k in raw_keys)
+
+        if has_raw:
+            lines.append("  -- CSRankNorm label 口径（训练用，数值偏高） --")
+        for name in norm_keys:
+            if name in ic_summary:
+                lines.append(f"  {name:<20s} {ic_summary[name]:.4f}")
+
+        if has_raw:
+            lines.append("")
+            lines.append("  -- 原始收益率 label 口径（真实预测力） --")
+            for name in raw_keys:
+                if name in ic_summary:
+                    lines.append(f"  {name:<20s} {ic_summary[name]:.4f}")
+            lines.append("")
+            lines.append("  ⚠ CSRankNorm 会放大 IC，评估模型真实预测力请看原始口径")
+
+        # 输出其他自定义 IC 指标
+        shown = set(norm_keys + raw_keys)
         for name, val in ic_summary.items():
-            lines.append(f"  {name:<20s} {val:.4f}")
+            if name not in shown:
+                lines.append(f"  {name:<20s} {val:.4f}")
 
     # ── 买卖信号 ──
     if trade_signals is not None and not trade_signals.empty:

@@ -13,8 +13,9 @@ backtest:
     limit_threshold: 0.099  # 涨跌停阈值
     deal_price: "open"      # 成交价格（T+1开盘价，更贴近实盘）
     open_cost: 0.0005       # 买入成本 (佣金万3 + 滑点万2)
-    close_cost: 0.0015      # 卖出成本 (佣金万3 + 印花税千1 + 滑点万2)
+    close_cost: 0.0015      # 卖出成本 (佣��万3 + 印花税千1 + 滑点万2)
     min_cost: 5             # 最低佣金
+    trade_unit: 100         # A股最小交易单位（1手=100股）
 
   # 评估指标
   metrics:
