@@ -91,9 +91,8 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
             vol_all = D.features(
                 instruments, ["$volume"], start_time="2005-01-01", end_time=end_date,
             )
-            first_trade = vol_all[vol_all["$volume"] > 0].groupby(level=1).apply(
-                lambda x: x.index.get_level_values(0).min()
-            )
+            traded = vol_all[vol_all["$volume"] > 0]
+            first_trade = traded.index.to_frame().groupby(level=1)[traded.index.names[0]].min()
 
             ipo_mask = pd.Series(False, index=pred_score.index)
             for inst, listing_dt in first_trade.items():

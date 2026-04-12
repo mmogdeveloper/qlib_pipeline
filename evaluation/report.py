@@ -81,14 +81,14 @@ def generate_text_report(
         if has_raw:
             lines.append("  -- CSRankNorm label 口径（训练用，数值偏高） --")
         for name in norm_keys:
-            if name in ic_summary:
+            if name in ic_summary and ic_summary[name] is not None:
                 lines.append(f"  {name:<20s} {ic_summary[name]:.4f}")
 
         if has_raw:
             lines.append("")
             lines.append("  -- 原始收益率 label 口径（真实预测力） --")
             for name in raw_keys:
-                if name in ic_summary:
+                if name in ic_summary and ic_summary[name] is not None:
                     lines.append(f"  {name:<20s} {ic_summary[name]:.4f}")
             lines.append("")
             lines.append("  ⚠ CSRankNorm 会放大 IC，评估模型真实预测力请看原始口径")
@@ -96,7 +96,7 @@ def generate_text_report(
         # 输出其他自定义 IC 指标
         shown = set(norm_keys + raw_keys)
         for name, val in ic_summary.items():
-            if name not in shown:
+            if name not in shown and val is not None:
                 lines.append(f"  {name:<20s} {val:.4f}")
 
     # ── 买卖信号 ──
