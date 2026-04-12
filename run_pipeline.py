@@ -10,22 +10,26 @@ import sys
 import argparse
 from pathlib import Path
 
-# macOS + LightGBM: OpenMP 线程与 Python multiprocessing fork 冲突会导致 segfault
-# 使用 spawn 模式后可安全使用多线程; Qlib DatasetH 默认单进程计算因子不会 fork
+# macOS ARM64: PyTorch 和 LightGBM 各自捆绑了不同的 libomp.dylib，
+# 两个 OpenMP 运行时同时加载会导致线程初始化 segfault (EXC_BAD_ACCESS in __kmp_suspend_initialize_thread)。
+# 解决方案: 强制 LightGBM 使用单线程，避免触发 OpenMP 并行区域的冲突。
+# 这些环境变量必须在 import lightgbm / torch 之前设置。
+if sys.platform == "darwin":
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+else:
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+    os.environ.setdefault("MKL_NUM_THREADS", "4")
+
 import multiprocessing
 if sys.platform == "darwin":
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError:
         pass  # 已经设置过
-    # spawn 模式下 OpenMP 多线程是安全的，允许 LightGBM 利用多核
-    os.environ.setdefault("OMP_NUM_THREADS", "4")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-    os.environ.setdefault("MKL_NUM_THREADS", "4")
-else:
-    os.environ.setdefault("OMP_NUM_THREADS", "4")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-    os.environ.setdefault("MKL_NUM_THREADS", "4")
 
 # 确保项目根目录在 Python 路径中
 PROJECT_ROOT = Path(__file__).resolve().parent
