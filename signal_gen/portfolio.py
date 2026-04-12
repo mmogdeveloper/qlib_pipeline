@@ -64,41 +64,51 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     # 因此改用"pred 中有但 D.features 未返回的日期"作为停牌日
     if trading_rules.get("suspend_filter", False):
         try:
-            all_calendar = set(D.calendar(start_time=start_date, end_time=end_date))
-            volume_df = D.features(
-                instruments, ["$volume"], start_time=start_date, end_time=end_date
+            # 注意: $volume/$amount 在本项目 Qlib 数据库中返回空（数值量级过大被过滤）
+            # 改用 $close 作为"是否有交易数据"的判断依据（停牌日无 close 数据）
+            close_df = D.features(
+                instruments, ["$close"], start_time=start_date, end_time=end_date
             )
-            if isinstance(volume_df.index, pd.MultiIndex):
-                if list(volume_df.index.names) != list(pred_score.index.names):
-                    volume_df = volume_df.swaplevel(0, 1).sort_index()
+            if close_df is None or close_df.empty:
+                logger.warning("停牌过滤: D.features($close) 返回空数据，跳过")
+                n_suspended = 0
+            else:
+                # 统一索引顺序为 (datetime, instrument)
+                if isinstance(close_df.index, pd.MultiIndex):
+                    if list(close_df.index.names) != list(pred_score.index.names):
+                        close_df = close_df.swaplevel(0, 1)
 
-            actual_dates_per_inst = volume_df.groupby(level="instrument").apply(
-                lambda g: set(g.index.get_level_values("datetime"))
-            )
-
-            suspended_keys = []
-            for inst in instruments:
-                pred_dates = set(
-                    pred_score.loc[pred_score.index.get_level_values(1) == inst]
-                    .index.get_level_values(0)
+                # 构建 close_df 中存在的 (date_str, instrument) 集合
+                # 用字符串比较避免 Timestamp / datetime64 类型不一致导致集合运算失败
+                close_dates = close_df.index.get_level_values(0)
+                close_insts = close_df.index.get_level_values(1)
+                existing_keys = set(
+                    zip(
+                        [str(d)[:10] for d in close_dates],
+                        [str(i) for i in close_insts],
+                    )
                 )
-                actual_dates = actual_dates_per_inst.get(inst, set())
-                missing_dates = pred_dates - actual_dates
-                if missing_dates:
-                    logger.debug(f"停牌检测: {inst} 有 {len(missing_dates)} 天缺失")
-                    for dt in missing_dates:
+                logger.debug(f"停牌过滤: close_df 包含 {len(existing_keys)} 个交易日期-股票对")
+
+                # 找出 pred 中缺失的 (datetime, instrument) 键
+                pred_dates_raw = pred_score.index.get_level_values(0)
+                pred_insts_raw = pred_score.index.get_level_values(1)
+
+                suspended_keys = []
+                for dt, inst in zip(pred_dates_raw, pred_insts_raw):
+                    if (str(dt)[:10], str(inst)) not in existing_keys:
                         suspended_keys.append((dt, inst))
 
-            if suspended_keys:
-                suspended_idx = pd.MultiIndex.from_tuples(
-                    suspended_keys, names=pred_score.index.names
-                )
-                common_idx = mask.index.intersection(suspended_idx)
-                mask.loc[common_idx] = False
-                n_suspended = len(common_idx)
-            else:
-                n_suspended = 0
-            logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
+                if suspended_keys:
+                    suspended_idx = pd.MultiIndex.from_tuples(
+                        suspended_keys, names=pred_score.index.names
+                    )
+                    common_idx = mask.index.intersection(suspended_idx)
+                    mask.loc[common_idx] = False
+                    n_suspended = len(common_idx)
+                else:
+                    n_suspended = 0
+                logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
         except Exception as e:
             logger.warning(f"停牌过滤失败: {e}")
 

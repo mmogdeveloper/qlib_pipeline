@@ -37,15 +37,15 @@ factor:
 
     price_volume:
       - name: "corr_close_vol_20d"
-        expression: "Corr($close, $volume, 20)"
-        description: "20日量价相关系数"
+        expression: "Corr($close, $turnover, 20)"
+        description: "20日量价相关系数（用换手率替代成交量）"
       - name: "corr_close_vol_10d"
-        expression: "Corr($close, $volume, 10)"
-        description: "10日量价相关系数"
+        expression: "Corr($close, $turnover, 10)"
+        description: "10日量价相关系数（用换手率替代成交量）"
 
     liquidity:
       - name: "vwap_ratio"
-        expression: "Mean($amount/$volume, 10)"
+        expression: "Mean($vwap, 10)"
         description: "10日均VWAP"
 
   # 因子预处理
