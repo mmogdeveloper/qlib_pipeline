@@ -364,6 +364,257 @@ def stage_sensitivity(args, recorder=None):
     return csv_path
 
 
+def stage_topk_sensitivity(args, recorder=None):
+    """TopK 参数敏感性分析: 用多组 topk/n_drop 跑回测，检验参数稳健性"""
+    logger.info("=" * 60)
+    logger.info("【TopK 参数敏感性分析】")
+    logger.info("=" * 60)
+
+    import pandas as pd
+    from data.data_loader import get_data_loader
+    from signal_gen.portfolio import run_backtest_from_recorder
+    from evaluation.metrics import compute_metrics_from_report
+    from utils.helpers import set_config_override, clear_config_overrides
+
+    get_data_loader().init_qlib()
+
+    if recorder is None:
+        recorder = _get_recorder(args)
+
+    # 测试一系列 topk 值，n_drop 按比例调整 (约 topk 的 10%)
+    topk_values = [10, 15, 20, 25, 30, 40, 50]
+
+    results = []
+    for topk in topk_values:
+        n_drop = max(1, topk // 10)
+        logger.info(f"--- TopK={topk}, N_drop={n_drop} ---")
+
+        set_config_override("strategy", {"topk": topk, "n_drop": n_drop})
+
+        try:
+            bt_result = run_backtest_from_recorder(recorder)
+            portfolio_metric = bt_result["portfolio_metric"]
+            if isinstance(portfolio_metric, tuple):
+                report_df = portfolio_metric[0]
+            else:
+                report_df = portfolio_metric
+
+            if report_df is not None and "return" in report_df.columns:
+                metrics = compute_metrics_from_report(report_df)
+                results.append({
+                    "topk": topk,
+                    "n_drop": n_drop,
+                    "ann_return_with_cost": metrics.get("excess_return_with_cost/annualized_return", 0),
+                    "sharpe_with_cost": metrics.get("excess_return_with_cost/information_ratio", 0),
+                    "max_dd_with_cost": metrics.get("excess_return_with_cost/max_drawdown", 0),
+                    "ann_return_no_cost": metrics.get("excess_return_without_cost/annualized_return", 0),
+                    "sharpe_no_cost": metrics.get("excess_return_without_cost/information_ratio", 0),
+                    "abs_ann_return": metrics.get("return_with_cost/annualized_return", 0),
+                    "abs_sharpe": metrics.get("return_with_cost/information_ratio", 0),
+                })
+        except Exception as e:
+            logger.error(f"TopK={topk} 回测失败: {e}")
+            results.append({"topk": topk, "n_drop": n_drop, "error": str(e)})
+
+        clear_config_overrides("strategy")
+
+    # 输出结果
+    df = pd.DataFrame(results)
+    report_dir = ensure_dir(PROJECT_ROOT / "reports")
+    csv_path = report_dir / f"topk_sensitivity_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("TopK 参数敏感性分析结果:")
+    logger.info("=" * 80)
+    print(f"\n{'TopK':>6s} {'N_drop':>7s} {'超额年化':>10s} {'Sharpe':>8s} "
+          f"{'最大回撤':>10s} {'绝对年化':>10s} {'绝对Sharpe':>10s}")
+    print("-" * 80)
+    for r in results:
+        if "error" in r:
+            print(f"{r['topk']:>6d} {r['n_drop']:>7d} {'ERROR':>10s}")
+            continue
+        print(f"{r['topk']:>6d} {r['n_drop']:>7d} "
+              f"{r['ann_return_with_cost']:>10.4f} {r['sharpe_with_cost']:>8.4f} "
+              f"{r['max_dd_with_cost']:>10.4f} {r['abs_ann_return']:>10.4f} "
+              f"{r['abs_sharpe']:>10.4f}")
+    print()
+
+    logger.info(f"TopK 敏感性分析 CSV 已保存: {csv_path}")
+    return csv_path
+
+
+def stage_regime(args, recorder=None):
+    """市场环境过滤回测: 仅在大盘趋势向好时满仓，否则降低仓位或空仓
+
+    通过对比不同均线周期的回测结果，验证市场环境过滤对回撤控制的效果。
+    """
+    logger.info("=" * 60)
+    logger.info("【市场环境过滤分析】")
+    logger.info("=" * 60)
+
+    import numpy as np
+    import pandas as pd
+    from data.data_loader import get_data_loader
+    from evaluation.metrics import compute_metrics_from_report
+
+    get_data_loader().init_qlib()
+
+    if recorder is None:
+        recorder = _get_recorder(args)
+
+    bt_config = get_backtest_config()
+    st_config = get_strategy_config()
+
+    # 加载预测信号
+    pred = recorder.load_object("pred.pkl")
+    if pred is None:
+        raise RuntimeError("Recorder 中未找到 pred.pkl")
+
+    # 信号滞后1天（与 portfolio.py 保持一致）
+    pred_shifted = pred.copy()
+    if isinstance(pred_shifted.index, pd.MultiIndex):
+        pred_shifted = pred_shifted.reset_index()
+        date_col = pred_shifted.columns[0]
+        dates = sorted(pred_shifted[date_col].unique())
+        date_map = dict(zip(dates[:-1], dates[1:]))
+        pred_shifted[date_col] = pred_shifted[date_col].map(date_map)
+        pred_shifted = pred_shifted.dropna(subset=[date_col])
+        pred_shifted = pred_shifted.set_index(pred.index.names)
+
+    # 加载基准指数收益率，构造累计净值用于均线判断
+    from signal_gen.portfolio import _load_benchmark_returns
+    bench_returns = _load_benchmark_returns(
+        bt_config["benchmark"], bt_config["start_date"], bt_config["end_date"]
+    )
+    if bench_returns is None:
+        logger.error("无法加载基准指数数据，市场环境过滤需要基准数据")
+        return None
+
+    bench_nav = (1 + bench_returns).cumprod()
+
+    # 测试不同均线周期的环境过滤
+    ma_configs = [
+        {"name": "无过滤(基准)", "ma_short": 0, "ma_long": 0},
+        {"name": "MA5>MA20", "ma_short": 5, "ma_long": 20},
+        {"name": "MA10>MA30", "ma_short": 10, "ma_long": 30},
+        {"name": "MA20>MA60", "ma_short": 20, "ma_long": 60},
+        {"name": "MA5>MA60", "ma_short": 5, "ma_long": 60},
+    ]
+
+    results = []
+    for mc in ma_configs:
+        label = mc["name"]
+        logger.info(f"--- {label} ---")
+
+        try:
+            if mc["ma_short"] == 0:
+                # 无过滤：直接用原始信号回测
+                filtered_pred = pred_shifted
+            else:
+                # 计算均线交叉信号
+                short_ma = bench_nav.rolling(mc["ma_short"]).mean()
+                long_ma = bench_nav.rolling(mc["ma_long"]).mean()
+                regime_bullish = short_ma > long_ma  # True = 牛市环境
+
+                # 在熊市日期将所有股票的信号置为 0（策略不下单）
+                filtered_pred = pred_shifted.copy()
+                if isinstance(filtered_pred, pd.DataFrame):
+                    pred_dates = filtered_pred.index.get_level_values(0)
+                else:
+                    pred_dates = filtered_pred.index.get_level_values(0)
+
+                for dt in pred_dates.unique():
+                    # 用前一日的环境信号（避免前视偏差）
+                    regime_loc = regime_bullish.index.get_indexer([dt], method="ffill")
+                    if regime_loc[0] >= 0 and not regime_bullish.iloc[regime_loc[0]]:
+                        if isinstance(filtered_pred, pd.DataFrame):
+                            filtered_pred.loc[dt] = 0.0
+                        else:
+                            filtered_pred.loc[dt] = 0.0
+
+            # 用过滤后的信号执行回测
+            from qlib.contrib.evaluate import backtest_daily
+            from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
+
+            strategy = TopkDropoutStrategy(
+                signal=filtered_pred,
+                topk=st_config["topk"],
+                n_drop=st_config["n_drop"],
+            )
+
+            exchange_kwargs = dict(bt_config["exchange_kwargs"])
+            cost_config = st_config.get("cost", {})
+            if cost_config:
+                exchange_kwargs["open_cost"] = (
+                    cost_config.get("buy_commission", 0.0003)
+                    + cost_config.get("buy_slippage", 0.0002)
+                )
+                exchange_kwargs["close_cost"] = (
+                    cost_config.get("sell_commission", 0.0003)
+                    + cost_config.get("stamp_tax", 0.001)
+                    + cost_config.get("sell_slippage", 0.0002)
+                )
+
+            portfolio_metric, indicator = backtest_daily(
+                start_time=bt_config["start_date"],
+                end_time=bt_config["end_date"],
+                strategy=strategy,
+                account=bt_config["account"],
+                benchmark=bench_returns if bench_returns is not None else bt_config["benchmark"],
+                exchange_kwargs=exchange_kwargs,
+            )
+
+            if isinstance(portfolio_metric, tuple):
+                report_df = portfolio_metric[0]
+            else:
+                report_df = portfolio_metric
+
+            if report_df is not None and "return" in report_df.columns:
+                metrics = compute_metrics_from_report(report_df)
+                results.append({
+                    "regime_filter": label,
+                    "ann_return_with_cost": metrics.get("excess_return_with_cost/annualized_return", 0),
+                    "sharpe_with_cost": metrics.get("excess_return_with_cost/information_ratio", 0),
+                    "max_dd_with_cost": metrics.get("excess_return_with_cost/max_drawdown", 0),
+                    "ann_return_no_cost": metrics.get("excess_return_without_cost/annualized_return", 0),
+                    "abs_ann_return": metrics.get("return_with_cost/annualized_return", 0),
+                    "abs_max_dd": metrics.get("return_with_cost/max_drawdown", 0),
+                })
+        except Exception as e:
+            logger.error(f"{label} 回测失败: {e}")
+            import traceback
+            traceback.print_exc()
+            results.append({"regime_filter": label, "error": str(e)})
+
+    # 输出结果
+    df = pd.DataFrame(results)
+    report_dir = ensure_dir(PROJECT_ROOT / "reports")
+    csv_path = report_dir / f"regime_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    logger.info("")
+    logger.info("=" * 85)
+    logger.info("市场环境过滤分析结果:")
+    logger.info("=" * 85)
+    print(f"\n{'过滤条件':<16s} {'超额年化':>10s} {'超额Sharpe':>10s} "
+          f"{'超额最大回撤':>12s} {'绝对年化':>10s} {'绝对最大回撤':>12s}")
+    print("-" * 85)
+    for r in results:
+        if "error" in r:
+            print(f"{r['regime_filter']:<16s} {'ERROR':>10s}")
+            continue
+        print(f"{r['regime_filter']:<16s} "
+              f"{r['ann_return_with_cost']:>10.4f} {r['sharpe_with_cost']:>10.4f} "
+              f"{r['max_dd_with_cost']:>12.4f} {r['abs_ann_return']:>10.4f} "
+              f"{r['abs_max_dd']:>12.4f}")
+    print()
+
+    logger.info(f"市场环境过滤分析 CSV 已保存: {csv_path}")
+    return csv_path
+
+
 def run_all(args):
     """运行全流水线"""
     logger.info("#" * 60)
@@ -389,6 +640,14 @@ def run_all(args):
     if args.sensitivity:
         stage_sensitivity(args, recorder)
 
+    # 可选: TopK 参数敏感性分析
+    if args.topk_sensitivity:
+        stage_topk_sensitivity(args, recorder)
+
+    # 可选: 市场环境过滤分析
+    if args.regime:
+        stage_regime(args, recorder)
+
     logger.info("#" * 60)
     logger.info("# 全流水线运行完成!")
     logger.info(f"# 报告: {report}")
@@ -410,6 +669,9 @@ def main():
   python run_pipeline.py --stage sensitivity          # 单独运行成本敏感性分析
   python run_pipeline.py --stage backtest --n-drop 2 --rebalance month  # 低换手率回测
   python run_pipeline.py --stage all --skip-data --sensitivity  # 全流水线 + 敏感性分析
+  python run_pipeline.py --stage topk-sensitivity              # 单独运行 TopK 参数敏感性分析
+  python run_pipeline.py --stage regime                        # 单独运行市场环境过滤分析
+  python run_pipeline.py --stage all --skip-data --topk-sensitivity --regime  # 全部分析
         """,
     )
 
@@ -417,7 +679,8 @@ def main():
         "--stage",
         type=str,
         default="all",
-        choices=["all", "data", "model", "backtest", "evaluate", "sensitivity"],
+        choices=["all", "data", "model", "backtest", "evaluate",
+                 "sensitivity", "topk-sensitivity", "regime"],
         help="运行阶段 (default: all)",
     )
     parser.add_argument("--model", type=str, choices=["lgbm", "linear", "mlp"],
@@ -434,6 +697,10 @@ def main():
                         help="覆盖每期最多换出股票数 (降低可减少换手率)")
     parser.add_argument("--sensitivity", action="store_true",
                         help="运行成本敏感性分析 (多组成本参数回测)")
+    parser.add_argument("--topk-sensitivity", action="store_true",
+                        help="运行 TopK 参数敏感性分析 (多组 topk 值回测)")
+    parser.add_argument("--regime", action="store_true",
+                        help="运行市场环境过滤分析 (均线过滤降低回撤)")
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="日志级别")
@@ -453,6 +720,10 @@ def main():
         stage_evaluate(args)
     elif args.stage == "sensitivity":
         stage_sensitivity(args)
+    elif args.stage == "topk-sensitivity":
+        stage_topk_sensitivity(args)
+    elif args.stage == "regime":
+        stage_regime(args)
 
 
 if __name__ == "__main__":
