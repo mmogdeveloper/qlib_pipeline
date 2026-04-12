@@ -205,6 +205,63 @@ python run_pipeline.py --stage all --skip-data --no-custom-factors
 - **可视化**: 净值曲线、超额收益、月度热力图、回撤水下图、IC时序图
 - **报告**: HTML 格式，嵌入全部图表和指标
 
+## 运行测试
+
+### 安装测试依赖
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### 运行单元测试
+
+```bash
+make test              # 只跑 unit 测试（< 10 秒，无需网络和 Qlib 数据）
+```
+
+### 运行全部测试
+
+```bash
+make test-all          # unit + integration
+```
+
+### 生成覆盖率报告
+
+```bash
+make coverage          # 生成覆盖率报告（目标 unit 覆盖率 ≥ 70%）
+```
+
+### 测试结构
+
+```
+tests/
+├── conftest.py                    # 共享 fixtures（合成 OHLCV、pred_score 等）
+├── unit/                          # 单元测试（快速，无外部依赖）
+│   ├── test_helpers.py            # 工具函数（代码转换、日期解析、配置加载）
+│   ├── test_custom_factors.py     # Label 表达式前视偏差、因子加载
+│   ├── test_preprocessor.py       # 预处理器配置结构
+│   ├── test_signal_generator.py   # TopK 信号生成、格式校验
+│   ├── test_portfolio.py          # Signal shift、成本一致性、交易记录
+│   ├── test_metrics.py            # 评估指标边界情况、IC 独立校验
+│   └── test_visualization.py      # 超额收益公式回归测试
+├── integration/                   # 集成测试（需要 Qlib 环境）
+│   ├── test_factor_pipeline.py    # 因子流水线端到端
+│   └── test_backtest_pipeline.py  # 回测流水线端到端
+└── fixtures/
+    └── sample_data.py             # 合成数据生成器
+```
+
+### 自定义标记
+
+- `@pytest.mark.slow` — 慢速测试
+- `@pytest.mark.integration` — 需要 Qlib 环境的集成测试
+- `@pytest.mark.requires_qlib_data` — 需要真实 Qlib bin 数据
+
+```bash
+pytest tests/ -m "not integration"   # 跳过集成测试
+pytest tests/ -m "not slow"          # 跳过慢速测试
+```
+
 ## 常见问题
 
 ### Q: AKShare 下载被限速怎么办？
