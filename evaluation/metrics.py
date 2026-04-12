@@ -246,6 +246,12 @@ def _compute_raw_labels(pred: pd.DataFrame) -> Optional[pd.Series]:
     """从 Qlib 数据源重新计算原始 label（未经 CSRankNorm）
 
     用于独立校验 IC，避免 CSRankNorm 对 IC 的放大效应。
+
+    策略:
+    1. 先尝试 D.features 直接计算 label 表达式
+    2. 检查返回值域：原始收益率 std 应在 0.01~0.50
+    3. 若值域异常（可能返回了缓存的 CSRankNorm 数据），改用
+       DataHandlerLP.DK_R 获取真正的原始 label
     """
     try:
         import qlib
@@ -255,13 +261,11 @@ def _compute_raw_labels(pred: pd.DataFrame) -> Optional[pd.Series]:
         m_config = get_model_config()
         label_expr = m_config["label"]["expression"]
 
-        # 从 pred 的 index 提取 instruments 和时间范围
         dates = pred.index.get_level_values(0)
         instruments = pred.index.get_level_values(1).unique().tolist()
         start = dates.min()
         end = dates.max()
 
-        # 直接从 Qlib 数据源计算原始 label
         raw_label = D.features(
             instruments=instruments,
             fields=[label_expr],
@@ -270,21 +274,82 @@ def _compute_raw_labels(pred: pd.DataFrame) -> Optional[pd.Series]:
         )
         if raw_label is not None and not raw_label.empty:
             raw_label.columns = ["label"]
-            logger.debug(f"D.features 返回: shape={raw_label.shape}, "
-                         f"index.names={raw_label.index.names}")
 
-            # D.features 返回 (instrument, datetime)，pred 是 (datetime, instrument)
-            # 统一为 pred 的索引层级顺序
             if (isinstance(raw_label.index, pd.MultiIndex)
                     and list(raw_label.index.names) != list(pred.index.names)):
                 raw_label = raw_label.swaplevel(0, 1).sort_index()
-                logger.debug(f"swaplevel 后: index.names={raw_label.index.names}")
 
-            # 用 reindex 显式对齐到 pred 的索引
             raw_label = raw_label.reindex(pred.index)
+
+            # 诊断: 打印 raw_label 的 describe，验证值域
+            desc = raw_label["label"].describe()
+            logger.info(f"raw_label describe:\n{desc}")
+            label_std = desc.get("std", 0)
+
+            if label_std < 0.01 or label_std > 0.50:
+                logger.warning(
+                    f"raw_label std={label_std:.4f} 不在 [0.01, 0.50] 范围，"
+                    f"D.features 可能返回了缓存的处理后数据，尝试 DK_R 回退"
+                )
+                raw_label_dkr = _compute_raw_labels_via_dkr(pred)
+                if raw_label_dkr is not None:
+                    return raw_label_dkr
+
             n_valid = raw_label["label"].notna().sum()
-            logger.debug(f"reindex 对齐后: {n_valid}/{len(pred)} 条非空")
+            logger.info(f"raw_label 对齐后: {n_valid}/{len(pred)} 条非空")
             return raw_label
     except Exception as e:
         logger.debug(f"计算原始 label 失败: {e}")
+    return None
+
+
+def _compute_raw_labels_via_dkr(pred: pd.DataFrame) -> Optional[pd.Series]:
+    """通过 DataHandlerLP.DK_R 获取真正的原始 label（未经任何预处理）"""
+    try:
+        from qlib.data.dataset.handler import DataHandlerLP
+        from qlib.utils import init_instance_by_config
+        from utils.helpers import get_model_config
+
+        m_config = get_model_config()
+        label_expr = m_config["label"]["expression"]
+        label_name = m_config["label"].get("name", label_expr)
+
+        dates = pred.index.get_level_values(0)
+        start = str(dates.min())[:10]
+        end = str(dates.max())[:10]
+
+        handler_config = {
+            "class": "DataHandlerLP",
+            "module_path": "qlib.data.dataset.handler",
+            "kwargs": {
+                "start_time": start,
+                "end_time": end,
+                "instruments": "csi300",
+                "label": [[label_expr, label_name]],
+                "infer_processors": [],
+                "learn_processors": [],
+            },
+        }
+        handler = init_instance_by_config(handler_config)
+        raw_df = handler.fetch(
+            selector=slice(start, end),
+            col_set="label",
+            data_key=DataHandlerLP.DK_R,
+        )
+        if raw_df is not None and not raw_df.empty:
+            if isinstance(raw_df, pd.DataFrame):
+                raw_df = raw_df.iloc[:, 0]
+            raw_series = raw_df.reindex(pred.index)
+
+            desc = raw_series.describe()
+            logger.info(f"DK_R raw_label describe:\n{desc}")
+            label_std = desc.get("std", 0)
+            if 0.01 <= label_std <= 0.50:
+                logger.info("DK_R 获取的 raw label 值域正常，使用此数据")
+                result = pd.DataFrame({"label": raw_series}, index=pred.index)
+                return result
+            else:
+                logger.warning(f"DK_R raw_label std={label_std:.4f} 仍然异常")
+    except Exception as e:
+        logger.debug(f"DK_R 获取原始 label 失败: {e}")
     return None

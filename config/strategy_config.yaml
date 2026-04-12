@@ -21,8 +21,9 @@ strategy:
     limit_up_filter: true    # 涨停不买入
     limit_down_filter: true  # 跌停不卖出
 
-    # ST股过滤
-    st_filter: true
+    # ST股过滤（基于涨跌幅推断不可靠，误伤严重，默认关闭）
+    # 已由 limit_up_filter / limit_down_filter 替代
+    st_filter: false
 
     # 新股过滤
     ipo_filter:

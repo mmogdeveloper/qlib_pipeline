@@ -59,19 +59,45 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     total_before = len(pred_score)
     mask = pd.Series(True, index=pred_score.index)
 
-    # 停牌过滤: volume == 0
+    # 停牌过滤: 交易日历缺失判断
+    # AKShare 数据在停牌日直接跳过该日（不记录 volume=0），
+    # 因此改用"pred 中有但 D.features 未返回的日期"作为停牌日
     if trading_rules.get("suspend_filter", False):
         try:
+            all_calendar = set(D.calendar(start_time=start_date, end_time=end_date))
             volume_df = D.features(
                 instruments, ["$volume"], start_time=start_date, end_time=end_date
             )
-            volume_df = _align_to_pred(volume_df, pred_score.index)
-            volume_df.columns = ["volume"]
-            suspended = volume_df["volume"].isna() | (volume_df["volume"] <= 0)
-            common_idx = mask.index.intersection(suspended.index)
-            logger.info(f"停牌过滤: common_idx={len(common_idx)} 条")
-            mask.loc[common_idx] = mask.loc[common_idx] & ~suspended.loc[common_idx]
-            n_suspended = suspended.loc[common_idx].sum()
+            if isinstance(volume_df.index, pd.MultiIndex):
+                if list(volume_df.index.names) != list(pred_score.index.names):
+                    volume_df = volume_df.swaplevel(0, 1).sort_index()
+
+            actual_dates_per_inst = volume_df.groupby(level="instrument").apply(
+                lambda g: set(g.index.get_level_values("datetime"))
+            )
+
+            suspended_keys = []
+            for inst in instruments:
+                pred_dates = set(
+                    pred_score.loc[pred_score.index.get_level_values(1) == inst]
+                    .index.get_level_values(0)
+                )
+                actual_dates = actual_dates_per_inst.get(inst, set())
+                missing_dates = pred_dates - actual_dates
+                if missing_dates:
+                    logger.debug(f"停牌检测: {inst} 有 {len(missing_dates)} 天缺失")
+                    for dt in missing_dates:
+                        suspended_keys.append((dt, inst))
+
+            if suspended_keys:
+                suspended_idx = pd.MultiIndex.from_tuples(
+                    suspended_keys, names=pred_score.index.names
+                )
+                common_idx = mask.index.intersection(suspended_idx)
+                mask.loc[common_idx] = False
+                n_suspended = len(common_idx)
+            else:
+                n_suspended = 0
             logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
         except Exception as e:
             logger.warning(f"停牌过滤失败: {e}")
@@ -109,8 +135,8 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
             )
             vol_all = _align_to_pred(vol_all, pred_score.index)
             traded = vol_all[vol_all.iloc[:, 0] > 0]
-            # swaplevel 后 index=(datetime, instrument)，level 0=datetime
-            first_trade = traded.index.to_frame().groupby("instrument")["datetime"].min()
+            idx_df = traded.index.to_frame(index=False)
+            first_trade = idx_df.groupby("instrument")["datetime"].min()
 
             ipo_mask = pd.Series(False, index=pred_score.index)
             for inst, listing_dt in first_trade.items():
