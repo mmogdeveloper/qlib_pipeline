@@ -79,8 +79,8 @@ def tmp_config_dir(tmp_path):
     buy_commission: 0.0003
     sell_commission: 0.0003
     stamp_tax: 0.001
-    buy_slippage: 0.0002
-    sell_slippage: 0.0002
+    buy_slippage: 0.0002       # 万2
+    sell_slippage: 0.0002       # 万2
   initial_cash: 10000000
 """,
         encoding="utf-8",

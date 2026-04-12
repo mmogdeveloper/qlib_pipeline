@@ -146,11 +146,10 @@ def train_and_predict(
     return recorder
 
 
-def _generate_rolling_splits(data_config: dict) -> list:
-    """根据配置生成滚动时序切分方案
+def _compute_rolling_step_days(data_config: dict) -> int:
+    """根据配置计算 RollingGen 的步长（日历天数）
 
-    Returns:
-        [{"train": (start, end), "valid": (start, end), "test": (start, end)}, ...]
+    步长 = (总区间 - 一个窗口) / (n_splits - 1)
     """
     rolling_cfg = data_config.get("rolling", {})
     n_splits = rolling_cfg.get("n_splits", 5)
@@ -161,39 +160,22 @@ def _generate_rolling_splits(data_config: dict) -> list:
     total_start = datetime.strptime(data_config["split"]["train"]["start"], "%Y-%m-%d")
     total_end = datetime.strptime(data_config["split"]["test"]["end"], "%Y-%m-%d")
 
-    window_years = train_years + valid_years + test_years
-    total_years = (total_end - total_start).days / 365.25
-    step_years = max(1, (total_years - window_years) / max(n_splits - 1, 1))
-
-    splits = []
-    for i in range(n_splits):
-        offset = relativedelta(months=int(step_years * 12 * i))
-        train_start = total_start + offset
-        train_end = train_start + relativedelta(years=train_years) - relativedelta(days=1)
-        valid_start = train_end + relativedelta(days=1)
-        valid_end = valid_start + relativedelta(years=valid_years) - relativedelta(days=1)
-        test_start = valid_end + relativedelta(days=1)
-        test_end = test_start + relativedelta(years=test_years) - relativedelta(days=1)
-
-        if test_end > total_end:
-            test_end = total_end
-        if test_start > total_end:
-            break
-
-        splits.append({
-            "train": (train_start.strftime("%Y-%m-%d"), train_end.strftime("%Y-%m-%d")),
-            "valid": (valid_start.strftime("%Y-%m-%d"), valid_end.strftime("%Y-%m-%d")),
-            "test": (test_start.strftime("%Y-%m-%d"), test_end.strftime("%Y-%m-%d")),
-        })
-
-    return splits
+    window_days = int((train_years + valid_years + test_years) * 365.25)
+    total_days = (total_end - total_start).days
+    step_days = max(180, (total_days - window_days) // max(n_splits - 1, 1))
+    return step_days
 
 
 def train_and_predict_rolling(
     model_name: str = "lgbm",
     use_custom_factors: bool = True,
 ) -> dict:
-    """滚动时序验证：多折训练+预测，返回拼接后的 pred 和各折 IC
+    """滚动时序验证：使用 Qlib RollingGen 生成各折配置，防止数据泄露
+
+    RollingGen 保证：
+    - 每折 handler 的 fit_start_time/fit_end_time 严格限于训练区间
+    - CSRankNorm 等 learn_processors 仅在训练集上 fit
+    - segments 之间无重叠
 
     Returns:
         {"all_preds": DataFrame, "fold_metrics": [...], "recorder": last_recorder}
@@ -202,58 +184,50 @@ def train_and_predict_rolling(
     from qlib.utils import init_instance_by_config
     from qlib.workflow import R
     from qlib.workflow.record_temp import SignalRecord, SigAnaRecord
+    from qlib.workflow.task.gen import RollingGen
 
     d_config = get_data_config()
     m_config = get_model_config()
 
-    splits = _generate_rolling_splits(d_config)
-    logger.info(f"滚动验证: {len(splits)} 折")
-    for i, s in enumerate(splits):
-        logger.info(f"  折{i+1}: train={s['train']}, valid={s['valid']}, test={s['test']}")
+    # 构建基础任务配置（RollingGen 会滚动修改 segments 和 fit 时间）
+    base_workflow = build_workflow_config(model_name, use_custom_factors)
+    step_days = _compute_rolling_step_days(d_config)
+
+    base_task = {
+        "model": base_workflow["model"],
+        "dataset": base_workflow["dataset"],
+    }
+
+    rg = RollingGen(step=step_days, rtype=RollingGen.ROLL_SD)
+    tasks = rg.generate(base_task)
+
+    logger.info(f"滚动验证 (RollingGen): {len(tasks)} 折, step={step_days} 天")
+    for i, task in enumerate(tasks):
+        segs = task["dataset"]["kwargs"]["segments"]
+        logger.info(f"  折{i+1}: train={segs['train']}, valid={segs['valid']}, test={segs['test']}")
 
     all_preds = []
     fold_metrics = []
     last_recorder = None
 
-    for i, split in enumerate(splits):
+    for i, task in enumerate(tasks):
         logger.info(f"{'='*60}")
-        logger.info(f"滚动验证 折{i+1}/{len(splits)}")
+        logger.info(f"滚动验证 折{i+1}/{len(tasks)}")
         logger.info(f"{'='*60}")
 
-        label_expr = m_config["label"]["expression"]
-        custom_fields = get_custom_factor_expressions() if use_custom_factors else None
-
-        if custom_fields:
-            dataset_config = get_alpha158_with_custom_config(
-                instruments="csi300",
-                train_period=split["train"],
-                valid_period=split["valid"],
-                test_period=split["test"],
-                label_expr=label_expr,
-                custom_fields=custom_fields,
-            )
-        else:
-            dataset_config = get_alpha158_handler_config(
-                instruments="csi300",
-                train_period=split["train"],
-                valid_period=split["valid"],
-                test_period=split["test"],
-                label_expr=label_expr,
-            )
-
-        model_cfg = get_model_config_by_name(model_name, m_config)
+        segs = task["dataset"]["kwargs"]["segments"]
 
         logger.info(f"折{i+1}: 初始化数据集...")
-        dataset = init_instance_by_config(dataset_config)
+        dataset = init_instance_by_config(task["dataset"])
 
         logger.info(f"折{i+1}: 训练模型...")
-        model = init_instance_by_config(model_cfg)
+        model = init_instance_by_config(task["model"])
 
         with R.start(experiment_name=f"qlib_pipeline_{model_name}_rolling"):
             R.log_params(
-                model=model_name, fold=i+1, n_folds=len(splits),
-                train=str(split["train"]), valid=str(split["valid"]),
-                test=str(split["test"]),
+                model=model_name, fold=i+1, n_folds=len(tasks),
+                train=str(segs["train"]), valid=str(segs["valid"]),
+                test=str(segs["test"]),
             )
             model.fit(dataset)
 
@@ -265,8 +239,8 @@ def train_and_predict_rolling(
             sar.generate()
 
             pred = recorder.load_object("pred.pkl")
-            test_start = pd.Timestamp(split["test"][0])
-            test_end = pd.Timestamp(split["test"][1])
+            test_start = pd.Timestamp(segs["test"][0])
+            test_end = pd.Timestamp(segs["test"][1])
             pred_test = pred.loc[
                 (pred.index.get_level_values(0) >= test_start) &
                 (pred.index.get_level_values(0) <= test_end)
@@ -276,7 +250,7 @@ def train_and_predict_rolling(
             ic_metrics = recorder.list_metrics()
             fold_result = {
                 "fold": i + 1,
-                "test_period": f"{split['test'][0]}~{split['test'][1]}",
+                "test_period": f"{segs['test'][0]}~{segs['test'][1]}",
                 "ic_mean": ic_metrics.get("IC", 0),
                 "icir": ic_metrics.get("ICIR", 0),
                 "rank_ic": ic_metrics.get("Rank IC", 0),

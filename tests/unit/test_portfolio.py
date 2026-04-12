@@ -197,6 +197,21 @@ class TestCostConsistency:
                 "backtest_config.exchange_kwargs.close_cost 与 strategy_config.cost 不一致"
             )
 
+    def test_cost_values_match_target(self):
+        """Issue 4 回归测试：成本应为 open=0.0005, close=0.0015"""
+        from utils.helpers import get_strategy_config, get_backtest_config
+
+        st_config = get_strategy_config()
+        bt_config = get_backtest_config()
+
+        cost = st_config["cost"]
+        open_cost = cost["buy_commission"] + cost["buy_slippage"]
+        close_cost = cost["sell_commission"] + cost["stamp_tax"] + cost["sell_slippage"]
+
+        assert abs(open_cost - 0.0005) < 1e-10, f"open_cost={open_cost}, 期望 0.0005"
+        assert abs(close_cost - 0.0015) < 1e-10, f"close_cost={close_cost}, 期望 0.0015"
+        assert bt_config["exchange_kwargs"]["min_cost"] == 5
+
 
 # ── 交易记录提取 ────────────────────────────────────────────
 

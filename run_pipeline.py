@@ -228,23 +228,16 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
     ic_summary = None
     ic_series = None
     if recorder is not None:
+        # load_ic_from_recorder 已内置 raw label IC 计算，
+        # 返回的 ic_mean/rank_ic_mean 优先使用 raw label
         ic_summary = load_ic_from_recorder(recorder)
-        ic_series = load_ic_series_from_recorder(recorder)
+        ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
 
-        # 用原始 label 重算 IC 作为独立校验（不受 CSRankNorm 影响）
-        raw_ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
-        raw_rank_ic_series = load_ic_series_from_recorder(
-            recorder, use_raw_label=True, method="spearman",
-        )
         if ic_summary is not None:
-            if raw_ic_series is not None:
-                ic_summary["raw_ic_mean"] = float(raw_ic_series.mean())
-            if raw_rank_ic_series is not None:
-                ic_summary["raw_rank_ic_mean"] = float(raw_rank_ic_series.mean())
             logger.info(
-                f"原始 label Pearson IC: {ic_summary.get('raw_ic_mean', 'N/A')}, "
-                f"原始 label Rank IC (Spearman): {ic_summary.get('raw_rank_ic_mean', 'N/A')} "
-                f"(CSRankNorm IC: {ic_summary.get('ic_mean', 'N/A')})"
+                f"原始 label IC: {ic_summary.get('raw_ic_mean', 'N/A')}, "
+                f"原始 label Rank IC: {ic_summary.get('raw_rank_ic_mean', 'N/A')} "
+                f"(CSRankNorm IC: {ic_summary.get('csranknorm_ic_mean', 'N/A')})"
             )
 
     # ── 从 Recorder 生成买卖信号 ───────────────────────────

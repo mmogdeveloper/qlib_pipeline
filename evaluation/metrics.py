@@ -124,30 +124,58 @@ def compute_metrics_from_returns(
 
 
 def load_ic_from_recorder(recorder) -> Dict:
-    """从 Qlib Recorder 加载 SigAnaRecord 已计算的 IC 指标
+    """从 Qlib Recorder 加载 IC 指标，以 raw label 为主指标
 
-    SigAnaRecord.generate() 会将 IC/ICIR/Rank IC 等写入 recorder，
-    无需手动重新计算。
+    SigAnaRecord 写入的 IC 是基于 CSRankNorm label 计算的，会系统性偏高。
+    此函数额外用原始收益率 label 重算 IC，作为反映真实预测力的主指标。
 
     Args:
         recorder: Qlib Recorder 对象
 
     Returns:
-        {"ic_mean": float, "icir": float, "rank_ic_mean": float, ...}
+        {"ic_mean": float, "icir": float, "rank_ic_mean": float, ...,
+         "raw_ic_mean": float, "raw_rank_ic_mean": float,
+         "csranknorm_ic_mean": float, ...}
         如果获取失败返回 None
     """
     try:
         rec_metrics = recorder.list_metrics()
-        if rec_metrics and ("IC" in rec_metrics or "ICIR" in rec_metrics):
-            ic_summary = {
-                "ic_mean": rec_metrics.get("IC", 0),
-                "icir": rec_metrics.get("ICIR", 0),
-                "rank_ic_mean": rec_metrics.get("Rank IC", 0),
-                "rank_icir": rec_metrics.get("Rank ICIR", 0),
-            }
-            logger.info(f"IC 指标从 Recorder 获取: IC={ic_summary['ic_mean']:.4f}, "
-                        f"ICIR={ic_summary['icir']:.4f}")
-            return ic_summary
+        if not rec_metrics or ("IC" not in rec_metrics and "ICIR" not in rec_metrics):
+            return None
+
+        # CSRankNorm IC（SigAnaRecord 计算，数值偏高，仅供参考）
+        csrank_ic = rec_metrics.get("IC", 0)
+        csrank_icir = rec_metrics.get("ICIR", 0)
+        csrank_rank_ic = rec_metrics.get("Rank IC", 0)
+        csrank_rank_icir = rec_metrics.get("Rank ICIR", 0)
+
+        # 用 raw label 重算 IC（真实预测力）
+        raw_ic_series = load_ic_series_from_recorder(recorder, use_raw_label=True)
+        raw_rank_ic_series = load_ic_series_from_recorder(
+            recorder, use_raw_label=True, method="spearman",
+        )
+        raw_ic_mean = float(raw_ic_series.mean()) if raw_ic_series is not None and len(raw_ic_series) > 0 else None
+        raw_rank_ic_mean = float(raw_rank_ic_series.mean()) if raw_rank_ic_series is not None and len(raw_rank_ic_series) > 0 else None
+
+        # 主指标优先用 raw label；回退到 CSRankNorm
+        ic_summary = {
+            "ic_mean": raw_ic_mean if raw_ic_mean is not None else csrank_ic,
+            "icir": csrank_icir,
+            "rank_ic_mean": raw_rank_ic_mean if raw_rank_ic_mean is not None else csrank_rank_ic,
+            "rank_icir": csrank_rank_icir,
+            "raw_ic_mean": raw_ic_mean,
+            "raw_rank_ic_mean": raw_rank_ic_mean,
+            "csranknorm_ic_mean": csrank_ic,
+            "csranknorm_icir": csrank_icir,
+            "csranknorm_rank_ic": csrank_rank_ic,
+            "csranknorm_rank_icir": csrank_rank_icir,
+        }
+
+        primary_ic = ic_summary["ic_mean"]
+        primary_label = "raw label" if raw_ic_mean is not None else "CSRankNorm(回退)"
+        logger.info(f"IC 主指标({primary_label}): IC={primary_ic:.4f}, "
+                    f"CSRankNorm IC={csrank_ic:.4f}")
+        return ic_summary
     except Exception as e:
         logger.warning(f"从 Recorder 获取 IC 失败: {e}")
     return None
@@ -201,10 +229,13 @@ def load_ic_series_from_recorder(
             )
         label_type = "原始" if use_raw_label else "CSRankNorm"
         method_label = "Rank IC" if method == "spearman" else "IC"
-        ic_mean = ic.mean()
-        logger.info(f"{method_label} 时间序列已计算({label_type} label): {len(ic)} 个交易日, "
-                     f"{method_label}均值={ic_mean:.4f}" if not pd.isna(ic_mean) else
-                     f"{method_label} 时间序列已计算({label_type} label): {len(ic)} 个交易日, {method_label}均值=NaN")
+        ic_mean = float(ic.mean()) if len(ic) > 0 else float("nan")
+        if not pd.isna(ic_mean):
+            logger.info(f"{method_label} 时间序列已计算({label_type} label): "
+                        f"{len(ic)} 个交易日, {method_label}均值={ic_mean:.4f}")
+        else:
+            logger.info(f"{method_label} 时间序列已计算({label_type} label): "
+                        f"{len(ic)} 个交易日, {method_label}均值=NaN")
         return ic
     except Exception as e:
         logger.warning(f"计算 IC 时间序列失败: {e}")

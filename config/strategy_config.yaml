@@ -37,8 +37,9 @@ strategy:
     buy_commission: 0.0003     # 买入佣金 万3
     sell_commission: 0.0003    # 卖出佣金 万3
     stamp_tax: 0.001           # 印花税 千1（仅卖出）
-    buy_slippage: 0.0005       # 买入滑点 万5
-    sell_slippage: 0.0005      # 卖出滑点 万5
+    buy_slippage: 0.0002       # 买入滑点 万2
+    sell_slippage: 0.0002      # 卖出滑点 万2
+    # 汇总: open_cost=0.0005, close_cost=0.0015, min_cost=5
 
   # 初始资金
   initial_cash: 10000000  # 1000万
