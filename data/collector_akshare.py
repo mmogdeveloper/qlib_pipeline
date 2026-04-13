@@ -84,7 +84,7 @@ class AKShareCollector:
             DataFrame: 包含 code, name 列
         """
         logger.info("获取沪深300成分股列表...")
-        df = self._retry(ak.index_stock_cons_csindex, symbol="000300")
+        df = self._retry(ak.index_stock_cons_csindex, symbol=self.config["benchmark_index"])
         # 标准化列名：兼容 AKShare 不同版本的返回格式
         col_rename = {
             "成分券代码": "code", "成分券名称": "name",
@@ -224,7 +224,7 @@ class AKShareCollector:
         df = df[(df["date"] >= start) & (df["date"] <= end)]
         df = df.sort_values("date").reset_index(drop=True)
 
-        save_path = self.index_dir / "SH000300.csv"
+        save_path = self.index_dir / f"{self.config['benchmark_symbol'].upper()}.csv"
         df.to_csv(save_path, index=False)
         logger.info(f"基准指数已保存: {save_path} ({len(df)} 条)")
         return df
@@ -412,7 +412,7 @@ class AKShareCollector:
             try:
                 df = self._retry(
                     ak.index_stock_cons_weight_csindex,
-                    symbol="000300",
+                    symbol=self.config["benchmark_index"],
                     date=date,
                 )
                 if df is None or df.empty:

@@ -28,11 +28,16 @@ strategy:
   trading_rules:
     # 涨跌停限制
     limit_up_filter: true    # 涨停不买入
+    limit_up_threshold: 0.095        # 一字涨停判断阈值（开盘价/前收盘价 - 1）
+    exchange_limit_threshold: 0.099  # 传入 exchange_kwargs 的涨跌停阈值
     limit_down_filter: true  # 跌停不卖出
 
     # ST股过滤（基于涨跌幅推断不可靠，误伤严重，默认关闭）
     # 已由 limit_up_filter / limit_down_filter 替代
     st_filter: false
+    st_threshold: 0.055   # ST股涨跌幅阈值（近N日最大|涨跌幅|≤此值判为ST）
+    st_window: 10         # ST判断滚动窗口天数
+    st_min_periods: 5     # ST判断最小有效天数
 
     # 新股过滤
     ipo_filter:

@@ -191,7 +191,7 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
                 valid = price_df["prev_close"] > 0
                 gap = pd.Series(0.0, index=price_df.index)
                 gap.loc[valid] = price_df.loc[valid, "open"] / price_df.loc[valid, "prev_close"] - 1
-                is_limit_up_open = gap > 0.095
+                is_limit_up_open = gap > trading_rules.get("limit_up_threshold", 0.095)
                 common_idx = mask.index.intersection(is_limit_up_open.index)
                 n_limit_up = int(is_limit_up_open.loc[common_idx].sum())
                 mask.loc[common_idx] = mask.loc[common_idx] & ~is_limit_up_open.loc[common_idx]
@@ -209,9 +209,11 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
             close_df = _align_to_pred(close_df, pred_score.index)
             close_df.columns = ["close", "prev_close"]
             daily_ret = (close_df["close"] / close_df["prev_close"] - 1).abs()
-            max_ret_10d = daily_ret.groupby(level=1).rolling(10, min_periods=5).max()
-            max_ret_10d = max_ret_10d.droplevel(0)
-            is_st = max_ret_10d <= 0.055
+            st_window = trading_rules.get("st_window", 10)
+            st_min_periods = trading_rules.get("st_min_periods", 5)
+            max_ret_nd = daily_ret.groupby(level=1).rolling(st_window, min_periods=st_min_periods).max()
+            max_ret_nd = max_ret_nd.droplevel(0)
+            is_st = max_ret_nd <= trading_rules.get("st_threshold", 0.055)
             common_idx = mask.index.intersection(is_st.index)
             mask.loc[common_idx] = mask.loc[common_idx] & ~is_st.loc[common_idx]
             n_st = is_st.loc[common_idx].sum()
@@ -441,7 +443,9 @@ def run_backtest(pred_score: pd.DataFrame, config: Optional[dict] = None) -> Dic
     exchange_kwargs = dict(bt_config["exchange_kwargs"])
     trading_rules = st_config.get("trading_rules", {})
     if trading_rules.get("limit_up_filter"):
-        exchange_kwargs.setdefault("limit_threshold", 0.099)
+        exchange_kwargs.setdefault(
+            "limit_threshold", trading_rules.get("exchange_limit_threshold", 0.099)
+        )
 
     # 用 strategy_config 的成本覆盖 backtest_config（单一事实源）
     cost_config = st_config.get("cost", {})
@@ -607,7 +611,8 @@ def _load_benchmark_returns(benchmark_csv: str, start_date: str, end_date: str) 
     from utils.helpers import expand_path, get_data_config
 
     config = get_data_config()
-    csv_path = expand_path(config["raw_csv_dir"]) / "index" / "SH000300.csv"
+    benchmark_filename = f"{config['benchmark_symbol'].upper()}.csv"
+    csv_path = expand_path(config["raw_csv_dir"]) / "index" / benchmark_filename
     if not csv_path.exists():
         return None
 
