@@ -66,6 +66,15 @@ factor:
     corr_max: 0.90           # IC 时序相关系数超过此值视为冗余，保留 ICIR 更高的
     fallback_on_missing: true  # CSV 不存在时回退到全量因子（不报错，仅警告）
 
+    # 第三道过滤：LightGBM feature importance（gain 口径）
+    # 需要先完成一次训练，reports/feature_importance_lgbm.csv 存在后才生效
+    # 与 ICIR 过滤互补：ICIR 衡量单因子预测力，gain 衡量模型实际使用程度
+    feature_importance_filter:
+      enabled: true
+      importance_path: "reports/feature_importance_lgbm.csv"  # model_trainer 训练后自动生成
+      min_gain_pct: 0.5   # 自定义因子 gain% 低于此阈值则移除（Alpha158 因子永远不删）
+      fallback_on_missing: true  # CSV 不存在时跳过此道过滤，不报错
+
   # 因子预处理
   preprocessing:
     fillna:

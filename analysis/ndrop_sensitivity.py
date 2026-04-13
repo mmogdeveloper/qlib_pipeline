@@ -36,6 +36,8 @@ from utils.helpers import (
 
 
 DEFAULT_N_DROPS = [1, 3, 5, 10, 20]
+# 当前策略默认 n_drop=3；若修改 strategy_config.yaml 请同步改此处
+_CURRENT_N_DROP = 3
 
 
 def _load_recorder(model_name: str, rolling: bool = False):
@@ -193,19 +195,21 @@ def _save_results(df: pd.DataFrame, output_dir: Path) -> dict:
                 row=row,
                 col=col_pos,
             )
-            # 标记 n_drop=1（当前配置）
-            fig.add_trace(
-                go.Scatter(
-                    x=[str(x[0])],
-                    y=[y[0]],
-                    mode="markers",
-                    marker=dict(color="red", size=10, symbol="circle"),
-                    name="当前配置(n_drop=1)" if col == "年化超额收益" else None,
-                    showlegend=(col == "年化超额收益"),
-                ),
-                row=row,
-                col=col_pos,
-            )
+            # 标记当前配置（红点）
+            if _CURRENT_N_DROP in x:
+                cur_idx = x.index(_CURRENT_N_DROP)
+                fig.add_trace(
+                    go.Scatter(
+                        x=[str(_CURRENT_N_DROP)],
+                        y=[y[cur_idx]],
+                        mode="markers",
+                        marker=dict(color="red", size=10, symbol="circle"),
+                        name=f"当前配置(n_drop={_CURRENT_N_DROP})" if col == "年化超额收益" else None,
+                        showlegend=(col == "年化超额收益"),
+                    ),
+                    row=row,
+                    col=col_pos,
+                )
 
         fig.update_layout(
             title_text="n_drop 敏感性分析（横轴=n_drop 值，红点=当前配置）",
@@ -264,7 +268,7 @@ def main():
 
     # 输出结论
     best_ndrop = df["超额Sharpe"].idxmax()
-    current_ndrop = args.n_drops[0]
+    current_ndrop = _CURRENT_N_DROP
     current_sharpe = df.loc[current_ndrop, "超额Sharpe"] if current_ndrop in df.index else float("nan")
     best_sharpe = df.loc[best_ndrop, "超额Sharpe"]
     if best_ndrop != current_ndrop:

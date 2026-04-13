@@ -79,11 +79,7 @@ def stage_data(args):
 
 
 def stage_model(args):
-    """阶段2+3: 因子 + 模型训练
-
-    若从 run_all() 调用，因子 IC 分析已在上游运行；
-    若单独执行 --stage model，此处自动补跑一次。
-    """
+    """阶段2+3: 因子 + 模型训练"""
     logger.info("=" * 60)
     logger.info("【阶段2+3】因子构建 + 模型训练")
     logger.info("=" * 60)
@@ -91,14 +87,8 @@ def stage_model(args):
     from data.data_loader import get_data_loader
     from model.model_trainer import train_and_predict, train_and_predict_rolling
 
-    # 初始化 Qlib（因子 IC 分析也需要，先于分析运行）
     loader = get_data_loader()
     loader.init_qlib()
-
-    # 单独运行 --stage model 时，补跑因子 IC 分析
-    # run_all() 调用时已在上游执行，_run_pre_factor_ic 内部会检查 skip_factor_ic
-    if not getattr(args, "_factor_ic_done", False):
-        _run_pre_factor_ic(args)
 
     # 训练模型
     model_name = args.model or get_model_config().get("default", "lgbm")
@@ -757,9 +747,9 @@ def run_all(args):
     else:
         logger.info("跳过数据阶段")
 
-    # 阶段2: 训练前因子 IC 分析（刷新过滤 CSV，模型训练时 auto_filter 会读取）
-    _run_pre_factor_ic(args)
-    args._factor_ic_done = True   # 标记已完成，stage_model 内不重复运行
+    # 阶段2: 因子 IC 分析（可选，--factor-ic 显式触发）
+    if args.factor_ic:
+        stage_factor_ic(args)
 
     # 阶段3: 因子 + 模型训练
     recorder = stage_model(args)

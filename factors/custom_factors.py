@@ -45,6 +45,16 @@ def get_custom_factor_expressions(config: Optional[dict] = None) -> List[Tuple[s
     filtered = _apply_icir_filter(candidates, summary, af.get("icir_min_abs", 0.1))
     filtered = _apply_dedup_filter(filtered, ic_series, summary, af.get("corr_max", 0.90))
 
+    # 第三道过滤：LightGBM feature importance（gain 口径）
+    fi_cfg = af.get("feature_importance_filter", {})
+    if fi_cfg.get("enabled", False):
+        filtered = _apply_feature_importance_filter(
+            filtered,
+            fi_cfg.get("importance_path", "reports/feature_importance_lgbm.csv"),
+            fi_cfg.get("min_gain_pct", 0.5),
+            fi_cfg.get("fallback_on_missing", True),
+        )
+
     removed = [n for _, n in candidates if n not in {n2 for _, n2 in filtered}]
     if removed:
         logger.info(f"auto_filter 移除 {len(removed)} 个因子: {removed}")
@@ -188,6 +198,61 @@ def _apply_dedup_filter(
     result = [(expr, name) for expr, name in candidates
               if name not in available or name in keep_set]
     return result
+
+
+def _apply_feature_importance_filter(
+    candidates: List[Tuple[str, str]],
+    importance_path: str,
+    min_gain_pct: float,
+    fallback_on_missing: bool,
+) -> List[Tuple[str, str]]:
+    """第三道过滤：读取上一次训练输出的 feature importance CSV
+
+    仅过滤自定义因子（Alpha158 的因子不在 candidates 里，永远不受影响）。
+    gain_pct < min_gain_pct 的自定义因子被视为"模型实际不使用"，直接移除。
+
+    注意：该过滤依赖上一次训练的结果（迭代精简），
+    首次训练前文件不存在时由 fallback_on_missing 控制行为。
+    """
+    import pandas as pd
+
+    imp_path = PROJECT_ROOT / importance_path
+    if not imp_path.exists():
+        if fallback_on_missing:
+            logger.warning(
+                f"feature_importance_filter: {imp_path} 不存在，跳过此道过滤"
+                "（首次训练后自动生成，下次运行时生效）"
+            )
+            return candidates
+        raise FileNotFoundError(
+            f"feature_importance_filter 需要先完成一次训练以生成: {imp_path}"
+        )
+
+    try:
+        imp = pd.read_csv(imp_path, encoding="utf-8-sig")
+        if "feature" not in imp.columns or "gain_pct" not in imp.columns:
+            logger.warning("feature_importance_filter: CSV 缺少 feature/gain_pct 列，跳过")
+            return candidates
+
+        gain_map = dict(zip(imp["feature"], imp["gain_pct"]))
+    except Exception as e:
+        logger.warning(f"feature_importance_filter: 读取 CSV 失败，跳过: {e}")
+        return candidates
+
+    kept = []
+    for expr, name in candidates:
+        pct = gain_map.get(name)
+        if pct is None:
+            # 该因子不在上次训练的特征集中（新增因子），保留以便本次训练评估
+            logger.debug(f"  {name}: 不在 importance CSV 中（新增），保留")
+            kept.append((expr, name))
+        elif pct >= min_gain_pct:
+            kept.append((expr, name))
+            logger.debug(f"  {name}: gain_pct={pct:.2f}% ≥ {min_gain_pct}%，保留")
+        else:
+            logger.info(f"  {name}: gain_pct={pct:.2f}% < {min_gain_pct}%，移除（模型实际不使用）")
+
+    return kept
 
 
 def get_all_factor_fields(config: Optional[dict] = None) -> List[Tuple[str, str]]:

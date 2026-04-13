@@ -44,6 +44,66 @@ def get_model_config_by_name(model_name: str, config: Optional[dict] = None) -> 
     return MODEL_REGISTRY[model_name](config)
 
 
+def _save_feature_importance(model, model_name: str) -> None:
+    """训练完成后导出 LightGBM feature importance（gain口径）到 CSV
+
+    输出格式：
+        feature, gain, gain_pct
+    gain_pct = 该因子 gain / 所有因子 gain 之和，用于后续自动过滤
+
+    仅对 LightGBM 有效；其他模型静默跳过。
+    输出路径：reports/feature_importance_<model_name>.csv
+    （每次训练覆盖写，滚动验证中最后一折的结果作为最终参考）
+    """
+    import pandas as pd
+
+    booster = getattr(model, "model", None)
+    if booster is None:
+        return
+    if not hasattr(booster, "feature_importance"):
+        return
+
+    try:
+        gain = booster.feature_importance(importance_type="gain")
+        names = booster.feature_name()
+        total_gain = gain.sum()
+        if total_gain == 0:
+            logger.warning("feature importance: 所有因子 gain 均为 0，跳过保存")
+            return
+
+        imp = (
+            pd.DataFrame({"feature": names, "gain": gain})
+            .assign(gain_pct=lambda df: df["gain"] / total_gain * 100)
+            .sort_values("gain", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        reports_dir = ensure_dir(PROJECT_ROOT / "reports")
+        csv_path = reports_dir / f"feature_importance_{model_name}.csv"
+        imp.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        # 打印 top10 和自定义因子排名（帮助快速诊断）
+        top10 = imp.head(10)[["feature", "gain_pct"]].to_string(index=False)
+        logger.info(f"Feature Importance Top10 (gain%):\n{top10}")
+
+        # 找出 gain_pct < 0.5% 的自定义因子（不在此处删除，由 custom_factors 读取决策）
+        from factors.custom_factors import get_all_factor_fields
+        try:
+            all_custom = {name for _, name in get_all_factor_fields()}
+            weak = imp[(imp["feature"].isin(all_custom)) & (imp["gain_pct"] < 0.5)]
+            if not weak.empty:
+                logger.info(
+                    f"自定义因子中 gain_pct<0.5% 的弱因子（将在下次训练前过滤）:\n"
+                    + weak[["feature", "gain_pct"]].to_string(index=False)
+                )
+        except Exception:
+            pass
+
+        logger.info(f"Feature importance 已保存: {csv_path}")
+    except Exception as e:
+        logger.warning(f"导出 feature importance 失败（不影响训练）: {e}")
+
+
 def build_workflow_config(
     model_name: str = "lgbm",
     use_custom_factors: bool = True,
@@ -130,6 +190,9 @@ def train_and_predict(
         with open(model_path, "wb") as f:
             pickle.dump(model, f)
         logger.info(f"模型已保存: {model_path}")
+
+        # 导出 feature importance（仅 LightGBM）
+        _save_feature_importance(model, model_name)
 
         recorder = R.get_recorder()
 
@@ -239,6 +302,7 @@ def train_and_predict_rolling(
                 test=str(segs["test"]),
             )
             model.fit(dataset)
+            _save_feature_importance(model, model_name)
 
             recorder = R.get_recorder()
             sr = SignalRecord(model=model, dataset=dataset, recorder=recorder)
