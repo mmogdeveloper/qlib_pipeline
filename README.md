@@ -41,6 +41,8 @@ qlib_pipeline/
 ├── logs/                       # 日志目录
 ├── reports/                    # 报告输出目录
 ├── run_pipeline.py             # 一键运行全流水线
+├── clear_result.py             # 清空 logs/ 和 reports/ 目录
+├── diag.py                     # MLflow 实验记录诊断脚本
 ├── requirements.txt
 └── README.md
 ```
@@ -136,6 +138,31 @@ python run_pipeline.py --stage all --skip-data
 python run_pipeline.py --stage all --skip-data --no-custom-factors
 ```
 
+### 鲁棒性分析
+
+```bash
+# 成本敏感性分析（不同买卖成本组合）
+python run_pipeline.py --stage sensitivity
+
+# TopK 参数敏感性分析（不同持仓数 / 换出数组合）
+python run_pipeline.py --stage topk-sensitivity
+
+# 市场环境过滤分析（牛熊过滤对收益的影响）
+python run_pipeline.py --stage regime
+
+# 全流水线 + 全部分析
+python run_pipeline.py --stage all --skip-data --sensitivity --topk-sensitivity --regime
+```
+
+分析结果以 CSV 形式写入 `reports/` 目录（文件名带日期后缀）。
+
+### 辅助脚本
+
+```bash
+python clear_result.py    # 清空 logs/ 和 reports/ 目录
+python diag.py            # 诊断 MLflow 实验记录状态
+```
+
 ## 配置说明
 
 所有参数通过 `config/` 目录下的 YAML 文件管理，无需修改代码。
@@ -145,7 +172,7 @@ python run_pipeline.py --stage all --skip-data --no-custom-factors
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `start_date` | 数据起始日期 | 2015-01-01 |
-| `end_date` | 数据结束日期 | 当前日期 |
+| `end_date` | 数据结束日期 | 2026-04-12 |
 | `download.max_workers` | 下载并发数 | 8 |
 | `download.rate_limit_sleep` | 请求间隔(秒) | 0.3 |
 
@@ -163,9 +190,12 @@ python run_pipeline.py --stage all --skip-data --no-custom-factors
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `topk` | 每期持仓数 | 30 |
-| `n_drop` | 每期最多换出数 | 5 |
+| `n_drop` | 每期最多换出数 | 3 |
 | `rebalance.frequency` | 调仓频率 | week |
-| `cost.stamp_tax` | 印花税 | 0.001 |
+| `cost.buy_commission` | 买入佣金 | 0.0003 |
+| `cost.sell_commission` | 卖出佣金 | 0.0003 |
+| `cost.stamp_tax` | 印花税（仅卖出） | 0.001 |
+| `cost.buy_slippage` / `sell_slippage` | 双向滑点 | 0.0002 |
 
 ## 五个阶段详解
 
@@ -179,31 +209,33 @@ python run_pipeline.py --stage all --skip-data --no-custom-factors
 ### 阶段2：因子
 
 - **基准因子集**: Qlib Alpha158（158个量价因子）
-- **自定义因子**: 动量、波动率、换手率、量价背离、流动性
+- **自定义因子**: 动量、波动率、换手率、量价背离、流动性（量相关因子统一使用换手率而非成交量，避免股本变动带来的尺度漂移）
 - **预处理**: MAD去极值 → Z-score标准化 → 缺失值填充
 
 ### 阶段3：模型
 
-- **LightGBM（默认）**: 梯度提升决策树，支持 early stopping
+- **LightGBM（默认）**: 梯度提升决策树，支持 early stopping；macOS 下强制单线程以规避 OpenMP 冲突
 - **Ridge 回归**: 带正则化的线性模型
 - **MLP（可选）**: 双隐藏层全连接网络 (256-128)
 - **预测目标**: 未来5日收益率
+- **滚动验证**: 支持多折训练配置（见 `model_config.yaml`）
 
 ### 阶段4：信号与组合
 
-- **选股**: TopkDropout 策略（每期选30只，最多换5只）
+- **选股**: TopkDropout 策略（每期选30只，最多换3只）
 - **权重**: 等权配置 / 分数加权
-- **A股规则**: 涨跌停限制、ST过滤、新股过滤、停牌处理
-- **成本**: 买入万5(佣金+滑点)、卖出万15(佣金+印花税+滑点)
+- **A股规则**: 涨跌停限制、ST 过滤、次新股过滤、停牌处理（停牌基于交易日历缺失判断）
+- **成本**: 买入≈万5(佣金万3+滑点万2)、卖出≈万15(佣金万3+印花税千1+滑点万2)
+- **可交易性过滤**: 信号生成阶段剔除当日不可交易的股票，避免无效持仓
 
 ### 阶段5：评估
 
 - **收益**: CAGR、累计收益、年化超额收益
 - **风险**: 年化波动率、最大回撤、下行波动率
 - **风险调整**: Sharpe、Sortino、Calmar、Information Ratio
-- **因子有效性**: IC、Rank IC、ICIR、IC胜率
+- **因子有效性**: IC、Rank IC、ICIR、IC胜率（同时输出 CSRankNorm 处理前后的原始 IC 以便交叉校验）
 - **可视化**: 净值曲线、超额收益、月度热力图、回撤水下图、IC时序图
-- **报告**: HTML 格式，嵌入全部图表和指标
+- **报告**: 纯文本格式（`.txt`），包含全部指标、每期选股明细与交易执行逻辑
 
 ## 运行测试
 
