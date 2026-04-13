@@ -217,6 +217,13 @@ def train_and_predict_rolling(
 
         segs = task["dataset"]["kwargs"]["segments"]
 
+        # RollingGen 在数据末端可能把 test_end 置为 None；用配置 test.end 兜底
+        if segs["test"][1] is None:
+            fallback_end = pd.Timestamp(d_config["split"]["test"]["end"])
+            segs["test"] = (segs["test"][0], fallback_end)
+            task["dataset"]["kwargs"]["segments"]["test"] = segs["test"]
+            logger.info(f"折{i+1}: test_end 为 None，已兜底到 {fallback_end.date()}")
+
         logger.info(f"折{i+1}: 初始化数据集...")
         dataset = init_instance_by_config(task["dataset"])
 
@@ -292,6 +299,13 @@ def train_and_predict_rolling(
     logger.info("-" * 70)
     logger.info(f"{'平均':>4s} {'':24s} {avg_ic:>8.4f} {avg_icir:>8.4f}")
     logger.info("")
+
+    # 持久化各折 IC 结果到 CSV
+    if fold_metrics:
+        reports_dir = ensure_dir(PROJECT_ROOT / "reports")
+        csv_path = reports_dir / f"rolling_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+        pd.DataFrame(fold_metrics).to_csv(csv_path, index=False, encoding="utf-8-sig")
+        logger.info(f"滚动验证各折结果已保存: {csv_path}")
 
     return {
         "all_preds": combined,

@@ -115,7 +115,8 @@ def stage_model(args):
 def _get_recorder(args):
     """从最近的实验加载 recorder"""
     from qlib.workflow import R
-    exp_name = f"qlib_pipeline_{args.model or 'lgbm'}"
+    suffix = "_rolling" if getattr(args, "rolling", False) else ""
+    exp_name = f"qlib_pipeline_{args.model or 'lgbm'}{suffix}"
     experiment = R.get_exp(experiment_name=exp_name)
     recorders = experiment.list_recorders(rtype=experiment.RT_L)
     if not recorders:
@@ -123,7 +124,11 @@ def _get_recorder(args):
     if isinstance(recorders, dict):
         return recorders[list(recorders.keys())[0]]
     finished = [r for r in recorders if r.info.get("status") == "FINISHED"]
-    return finished[-1] if finished else recorders[-1]
+    candidates = finished or recorders
+    # list_recorders 返回顺序不保证，取 start_time 最新的那个
+    def _start_time(r):
+        return r.info.get("start_time") or r.info.get("id", "")
+    return max(candidates, key=_start_time)
 
 
 def _apply_strategy_overrides(args):
