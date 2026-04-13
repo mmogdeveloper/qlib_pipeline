@@ -163,7 +163,7 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
                     pred_date_strs,
                     pred_score.index.get_level_values(1).astype(str),
                 ])
-                suspended_arr = pred_date_strs.isin(cal_set).to_numpy() & ~pred_mi.isin(close_mi)
+                suspended_arr = pred_date_strs.isin(cal_set) & ~pred_mi.isin(close_mi)
                 n_suspended = int(suspended_arr.sum())
                 if n_suspended > 0:
                     mask.loc[pred_score.index[suspended_arr]] = False
