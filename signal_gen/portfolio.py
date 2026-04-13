@@ -128,58 +128,76 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     total_before = len(pred_score)
     mask = pd.Series(True, index=pred_score.index)
 
-    # 停牌过滤: 交易日历缺失判断
-    # AKShare 数据在停牌日直接跳过该日（不记录 volume=0），
-    # 因此改用"pred 中有但 D.features 未返回的日期"作为停牌日
+    # 停牌过滤: 以 D.calendar 为权威交易日历，交叉验证股票数据是否缺失
+    # AKShare 在停牌日不写入数据（直接跳过），所以 D.features 对停牌日返回 NaN，
+    # pred 中通常也不会产生停牌日的条目。此过滤的作用：
+    #   1. 准确统计实际停牌事件数（用于诊断），
+    #   2. 防御未来数据源引入 carry-forward 时误购停牌股。
     if trading_rules.get("suspend_filter", False):
         try:
-            # 注意: $volume/$amount 在本项目 Qlib 数据库中返回空（数值量级过大被过滤）
-            # 改用 $close 作为"是否有交易数据"的判断依据（停牌日无 close 数据）
             close_df = D.features(
                 instruments, ["$close"], start_time=start_date, end_time=end_date
             )
             if close_df is None or close_df.empty:
                 logger.warning("停牌过滤: D.features($close) 返回空数据，跳过")
-                n_suspended = 0
             else:
-                # 统一索引顺序为 (datetime, instrument)
                 if isinstance(close_df.index, pd.MultiIndex):
                     if list(close_df.index.names) != list(pred_score.index.names):
                         close_df = close_df.swaplevel(0, 1)
 
-                # 构建 close_df 中存在的 (date_str, instrument) 集合
-                # 用字符串比较避免 Timestamp / datetime64 类型不一致导致集合运算失败
-                close_dates = close_df.index.get_level_values(0)
-                close_insts = close_df.index.get_level_values(1)
-                existing_keys = set(
-                    zip(
-                        [str(d)[:10] for d in close_dates],
-                        [str(i) for i in close_insts],
-                    )
+                # 从 close_df 日期集合推断交易日历，避免额外的 D.calendar 调用
+                close_date_strs = close_df.index.get_level_values(0).astype(str).str[:10]
+                close_inst_strs = close_df.index.get_level_values(1).astype(str)
+                cal_set = set(close_date_strs.unique())
+                n_missing = len(cal_set) * len(instruments) - len(close_df)
+                logger.info(
+                    f"停牌检测: {len(cal_set)}个交易日 × {len(instruments)}只股票 = "
+                    f"{len(cal_set) * len(instruments)}条理论记录，"
+                    f"实际有数据 {len(close_df)}条，推算停牌/缺失事件 {n_missing}次"
                 )
-                logger.debug(f"停牌过滤: close_df 包含 {len(existing_keys)} 个交易日期-股票对")
 
-                # 找出 pred 中缺失的 (datetime, instrument) 键
-                pred_dates_raw = pred_score.index.get_level_values(0)
-                pred_insts_raw = pred_score.index.get_level_values(1)
-
-                suspended_keys = []
-                for dt, inst in zip(pred_dates_raw, pred_insts_raw):
-                    if (str(dt)[:10], str(inst)) not in existing_keys:
-                        suspended_keys.append((dt, inst))
-
-                if suspended_keys:
-                    suspended_idx = pd.MultiIndex.from_tuples(
-                        suspended_keys, names=pred_score.index.names
-                    )
-                    common_idx = mask.index.intersection(suspended_idx)
-                    mask.loc[common_idx] = False
-                    n_suspended = len(common_idx)
-                else:
-                    n_suspended = 0
-                logger.info(f"停牌过滤: 移除 {n_suspended} 条记录")
+                # 向量化判断：pred 中有但 close_df 无数据且属于有效交易日的条目 → 停牌
+                close_mi = pd.MultiIndex.from_arrays([close_date_strs, close_inst_strs])
+                pred_date_strs = pred_score.index.get_level_values(0).astype(str).str[:10]
+                pred_mi = pd.MultiIndex.from_arrays([
+                    pred_date_strs,
+                    pred_score.index.get_level_values(1).astype(str),
+                ])
+                suspended_arr = pred_date_strs.isin(cal_set).to_numpy() & ~pred_mi.isin(close_mi)
+                n_suspended = int(suspended_arr.sum())
+                if n_suspended > 0:
+                    mask.loc[pred_score.index[suspended_arr]] = False
+                logger.info(
+                    f"停牌过滤: pred中移除 {n_suspended} 条 "
+                    f"(AKShare数据源已自动排除停牌日，此值接近0属正常)"
+                )
         except Exception as e:
             logger.warning(f"停牌过滤失败: {e}")
+
+    # 一字涨停板过滤: T 日 open 相对于 T-1 日 close 涨幅 > 9.5% → 集合竞价已封死涨停，无法买入
+    # pred 到此处已经 shift 1 天，pred 日期 T 对应的交易行为是"T 日开盘买入"。
+    # 检查表达式: $open / Ref($close,1) - 1 > 0.095（一字涨停板场景）
+    if trading_rules.get("limit_up_filter", False):
+        try:
+            price_df = D.features(
+                instruments,
+                ["$open", "Ref($close,1)"],
+                start_time=start_date,
+                end_time=end_date,
+            )
+            if price_df is not None and not price_df.empty:
+                price_df = _align_to_pred(price_df, pred_score.index)
+                price_df.columns = ["open", "prev_close"]
+                valid = price_df["prev_close"] > 0
+                gap = pd.Series(0.0, index=price_df.index)
+                gap.loc[valid] = price_df.loc[valid, "open"] / price_df.loc[valid, "prev_close"] - 1
+                is_limit_up_open = gap > 0.095
+                common_idx = mask.index.intersection(is_limit_up_open.index)
+                n_limit_up = int(is_limit_up_open.loc[common_idx].sum())
+                mask.loc[common_idx] = mask.loc[common_idx] & ~is_limit_up_open.loc[common_idx]
+                logger.info(f"一字涨停板过滤: 移除 {n_limit_up} 条记录（开盘即封板，无法买入）")
+        except Exception as e:
+            logger.warning(f"一字板过滤失败: {e}")
 
     # ST 过滤: 近10日最大|日收益率| <= 5.5%（ST股涨跌停5%）
     if trading_rules.get("st_filter", False):

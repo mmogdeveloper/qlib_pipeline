@@ -45,27 +45,44 @@ def main():
 
     # 阶段1: 下载数据
     if not args.skip_download:
-        logger.info("[阶段1/3] 全量下载数据...")
+        logger.info("[阶段1/4] 全量下载数据...")
         collector = AKShareCollector(config)
         collector.download_all()
-    else:
-        logger.info("[阶段1/3] 跳过下载")
 
-    # 阶段2: 数据健康检查
+        logger.info("[阶段2/4] 下载历史成分股快照（消除幸存者偏差）...")
+        snapshots = collector.download_constituent_history()
+        if snapshots:
+            dates = sorted(snapshots.keys())
+            sizes = [len(snapshots[d]) for d in dates]
+            if len(set(sizes)) == 1:
+                logger.warning(
+                    "⚠ 历史成分股快照中所有日期返回相同数量的股票，"
+                    "AKShare 的 index_stock_cons_weight_csindex 可能忽略了 date 参数，"
+                    "幸存者偏差可能仍然存在！请手动检查 csi300_history.json 确认不同日期的成分股确实不同。"
+                )
+            else:
+                logger.info(f"历史成分股快照验证通过: {len(dates)} 个时间节点，成分股数量有变化")
+        else:
+            logger.warning("⚠ 历史成分股快照获取失败，instruments 将回退到静态模式（幸存者偏差存在）")
+    else:
+        logger.info("[阶段1/4] 跳过下载")
+        logger.info("[阶段2/4] 跳过历史成分股快照下载")
+
+    # 阶段3: 数据健康检查
     if not args.skip_check:
-        logger.info("[阶段2/3] 数据健康检查...")
+        logger.info("[阶段3/4] 数据健康检查...")
         checker = DataHealthChecker(config)
         checker.run_full_check()
     else:
-        logger.info("[阶段2/3] 跳过健康检查")
+        logger.info("[阶段3/4] 跳过健康检查")
 
-    # 阶段3: CSV → Qlib .bin 转换
+    # 阶段4: CSV → Qlib .bin 转换
     if not args.skip_convert:
-        logger.info("[阶段3/3] CSV → Qlib .bin 转换...")
+        logger.info("[阶段4/4] CSV → Qlib .bin 转换（自动检测历史成分股数据）...")
         converter = CsvToQlib(config)
         converter.convert_all()
     else:
-        logger.info("[阶段3/3] 跳过转换")
+        logger.info("[阶段4/4] 跳过转换")
 
     logger.info("=" * 60)
     logger.info("数据初始化全部完成!")
