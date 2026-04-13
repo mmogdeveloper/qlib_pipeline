@@ -150,6 +150,9 @@ python run_pipeline.py --stage topk-sensitivity
 # 市场环境过滤分析（牛熊过滤对收益的影响）
 python run_pipeline.py --stage regime
 
+# 填充报告"策略目标达成评分"（topk 稳健性 + 市场环境过滤 + 回撤控制）
+python run_pipeline.py --stage all --skip-data --topk-sensitivity --regime
+
 # 全流水线 + 全部分析
 python run_pipeline.py --stage all --skip-data --sensitivity --topk-sensitivity --regime
 ```
