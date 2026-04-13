@@ -11,8 +11,10 @@ build/
 logs/
 *.log
 
-# Data (downloaded/generated)
-data/
+# Data (downloaded/generated) - 仅忽略数据文件，保留 Python 代码
+data/*
+!data/*.py
+!data/.gitkeep
 
 # MLflow
 mlruns/
