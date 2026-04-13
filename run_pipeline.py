@@ -397,13 +397,17 @@ def stage_topk_sensitivity(args, recorder=None):
     if recorder is None:
         recorder = _get_recorder(args)
 
-    # 测试一系列 topk 值，n_drop 按比例调整 (约 topk 的 10%)
+    # 测试一系列 topk 值。
+    # n_drop 固定为 1 以隔离 topk 的独立影响；
+    # 额外用 topk//10 测试"按比例 n_drop"的效果，供参考对比。
     topk_values = [10, 15, 20, 25, 30, 40, 50]
+    baseline_n_drop = get_strategy_config().get("n_drop", 1)
 
     results = []
     for topk in topk_values:
-        n_drop = max(1, topk // 10)
-        logger.info(f"--- TopK={topk}, N_drop={n_drop} ---")
+        # 用固定 n_drop=1 隔离 topk 效应（与基础策略 n_drop 保持一致）
+        n_drop = baseline_n_drop
+        logger.info(f"--- TopK={topk}, N_drop={n_drop} (固定, 隔离 topk 效应) ---")
 
         set_config_override("strategy", {"topk": topk, "n_drop": n_drop})
 
@@ -442,7 +446,7 @@ def stage_topk_sensitivity(args, recorder=None):
 
     logger.info("")
     logger.info("=" * 80)
-    logger.info("TopK 参数敏感性分析结果:")
+    logger.info(f"TopK 参数敏感性分析结果 (n_drop 固定={baseline_n_drop}, 隔离 topk 独立效应):")
     logger.info("=" * 80)
     print(f"\n{'TopK':>6s} {'N_drop':>7s} {'超额年化':>10s} {'Sharpe':>8s} "
           f"{'最大回撤':>10s} {'绝对年化':>10s} {'绝对Sharpe':>10s}")
@@ -649,10 +653,7 @@ def run_all(args):
     # 阶段4: 回测
     result, recorder = stage_backtest(args, recorder)
 
-    # 阶段5: 评估
-    report = stage_evaluate(args, result, recorder)
-
-    # 可选: 成本敏感性分析
+    # 可选: 成本敏感性分析（在评估报告之前运行，使报告能包含稳健性数据）
     if args.sensitivity:
         stage_sensitivity(args, recorder)
 
@@ -663,6 +664,9 @@ def run_all(args):
     # 可选: 市场环境过滤分析
     if args.regime:
         stage_regime(args, recorder)
+
+    # 阶段5: 评估与报告（最后运行，以便报告包含上方所有可选分析的 CSV 结果）
+    report = stage_evaluate(args, result, recorder)
 
     logger.info("#" * 60)
     logger.info("# 全流水线运行完成!")

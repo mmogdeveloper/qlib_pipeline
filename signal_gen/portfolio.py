@@ -557,6 +557,12 @@ def run_backtest_from_recorder(recorder) -> Dict:
         raise RuntimeError("Recorder 中未找到 pred.pkl，请确认模型训练已完成")
 
     logger.info(f"从 Recorder 加载预测信号: {pred.shape}")
+
+    # 诊断: 打印 pred 日期范围，帮助排查空仓问题
+    if isinstance(pred.index, pd.MultiIndex):
+        pred_dates = pred.index.get_level_values(0)
+        logger.info(f"pred 日期范围: {str(pred_dates.min())[:10]} ~ {str(pred_dates.max())[:10]}, "
+                    f"共 {pred_dates.nunique()} 个交易日, {pred.index.get_level_values(1).nunique()} 只股票")
     logger.info("开始回测...")
 
     # 将 signal 滞后1天，避免前视偏差
@@ -570,6 +576,21 @@ def run_backtest_from_recorder(recorder) -> Dict:
         pred_shifted = pred_shifted.dropna(subset=[date_col])
         pred_shifted = pred_shifted.set_index(pred.index.names)
     logger.info("signal 已滞后1天 (shift), 消除前视偏差")
+
+    # 诊断: 检测 pred 与回测窗口的重叠情况
+    if isinstance(pred_shifted.index, pd.MultiIndex):
+        shifted_dates = pred_shifted.index.get_level_values(0)
+        bt_start = pd.Timestamp(bt_config["start_date"])
+        bt_end = pd.Timestamp(bt_config["end_date"])
+        overlap = ((shifted_dates >= bt_start) & (shifted_dates <= bt_end)).sum()
+        if overlap == 0:
+            logger.warning(
+                f"⚠ pred shift 后无日期落入回测窗口 [{bt_config['start_date']} ~ {bt_config['end_date']}]! "
+                f"shift 后日期范围: {str(shifted_dates.min())[:10]} ~ {str(shifted_dates.max())[:10]}. "
+                "投资组合将全程空仓，请检查 recorder 是否来自正确的模型。"
+            )
+        else:
+            logger.debug(f"pred shift 后 {overlap} 条记录落入回测窗口")
 
     # 过滤不可交易标的（停牌、ST、次新）
     pred_shifted = _filter_untradable_stocks(pred_shifted)
