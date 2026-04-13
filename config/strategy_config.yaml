@@ -12,7 +12,7 @@ strategy:
 
   # 调仓频率
   rebalance:
-    frequency: "week"   # day / week / month
+    frequency: "day"   # day / week / month
     weekday: 4          # 周五(0=周一, 4=周五)，仅 week 模式
 
   # A股交易规则

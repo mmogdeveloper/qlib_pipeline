@@ -16,6 +16,75 @@ from loguru import logger
 from utils.helpers import get_strategy_config, get_backtest_config
 
 
+def _apply_rebalance_frequency(
+    pred: pd.DataFrame, frequency: str, weekday: int = 4
+) -> pd.DataFrame:
+    """按调仓频率对预测分数做"前向填充"
+
+    backtest_daily 是按日推进的, 想实现 week/month 调仓, 只需让非调仓日
+    的分数等于上一个调仓日的分数 — 这样 TopkDropoutStrategy 在非调仓日
+    看到的排名与上一日完全一致, 不会触发换仓。
+
+    Args:
+        pred: MultiIndex=(datetime, instrument), 含 score 列
+        frequency: "day" / "week" / "month"
+        weekday: 周内调仓日 (0=Mon, 4=Fri), 仅 frequency=week 生效
+
+    Returns:
+        前向填充后的 pred (索引不变)
+    """
+    if frequency == "day" or pred is None or pred.empty:
+        return pred
+    if not isinstance(pred.index, pd.MultiIndex):
+        return pred
+
+    dates = pd.DatetimeIndex(sorted(pred.index.get_level_values(0).unique()))
+    if frequency == "week":
+        # 每周中第一个 >= weekday 的交易日为调仓日
+        # 用 ISO 周分组, 取每组的"目标星期或之后第一个"
+        df_d = pd.DataFrame({"d": dates})
+        df_d["wk"] = df_d["d"].dt.isocalendar().week
+        df_d["yr"] = df_d["d"].dt.isocalendar().year
+        df_d["dow"] = df_d["d"].dt.dayofweek
+
+        def pick(group):
+            ge = group[group["dow"] >= weekday]
+            return ge.iloc[0]["d"] if not ge.empty else group.iloc[-1]["d"]
+
+        rebal_dates = (
+            df_d.groupby(["yr", "wk"], sort=True).apply(pick).tolist()
+        )
+    elif frequency == "month":
+        df_d = pd.DataFrame({"d": dates})
+        df_d["ym"] = df_d["d"].dt.to_period("M")
+        rebal_dates = df_d.groupby("ym")["d"].first().tolist()
+    else:
+        return pred
+
+    rebal_set = set(pd.Timestamp(d) for d in rebal_dates)
+    logger.info(
+        f"调仓频率={frequency}: {len(dates)} 个交易日 → {len(rebal_set)} 个调仓日"
+    )
+
+    # 把非调仓日的分数替换为最近一次调仓日的分数
+    # 实现: 先按 (instrument) 分组, 把非调仓日的 score 置 NaN, 再 ffill
+    pred_sorted = pred.sort_index()
+    score_col = pred_sorted.columns[0]
+
+    date_idx = pred_sorted.index.get_level_values(0)
+    is_rebal = pd.Series([pd.Timestamp(d) in rebal_set for d in date_idx],
+                         index=pred_sorted.index)
+    masked = pred_sorted[score_col].where(is_rebal)
+    # 按股票 ffill
+    filled = masked.groupby(level=1).ffill()
+    # 头部仍为 NaN 的交易日 (首个调仓日之前) 直接保留原值, 不影响后续
+    filled = filled.fillna(pred_sorted[score_col])
+
+    out = pred_sorted.copy()
+    out[score_col] = filled
+    return out
+
+
 def _align_to_pred(df: pd.DataFrame, pred_index: pd.MultiIndex) -> pd.DataFrame:
     """将 D.features() 返回的 DataFrame 对齐到 pred 的索引层级顺序
 
@@ -174,6 +243,27 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
+def _build_strategy(st_config: dict, signal):
+    """根据 weighting 配置实例化合适的策略
+
+    - equal: TopkDropoutStrategy (Qlib 内置, 等权)
+    - score_weighted: TopkScoreWeightedStrategy (本项目自定义, WeightStrategyBase)
+    """
+    from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
+
+    weighting = st_config.get("weighting", "equal")
+    topk = st_config["topk"]
+
+    if weighting == "score_weighted":
+        from signal_gen.strategies import TopkScoreWeightedStrategy
+        logger.info(f"策略: TopkScoreWeighted (topk={topk})")
+        return TopkScoreWeightedStrategy(signal=signal, topk=topk)
+
+    n_drop = st_config["n_drop"]
+    logger.info(f"策略: TopkDropout (topk={topk}, n_drop={n_drop}, equal weight)")
+    return TopkDropoutStrategy(signal=signal, topk=topk, n_drop=n_drop)
+
+
 def build_strategy_config(config: Optional[dict] = None) -> Dict[str, Any]:
     """构建 TopkDropoutStrategy 的配置字典
 
@@ -249,12 +339,16 @@ def run_backtest(pred_score: pd.DataFrame, config: Optional[dict] = None) -> Dic
     # 过滤不可交易标的（停牌、ST、次新）
     pred_score_shifted = _filter_untradable_stocks(pred_score_shifted)
 
-    # 实例化 TopkDropoutStrategy
-    strategy = TopkDropoutStrategy(
-        signal=pred_score_shifted,
-        topk=st_config["topk"],
-        n_drop=st_config["n_drop"],
+    # 调仓频率: week/month 通过分数前向填充实现
+    rebal = st_config.get("rebalance", {})
+    pred_score_shifted = _apply_rebalance_frequency(
+        pred_score_shifted,
+        rebal.get("frequency", "day"),
+        rebal.get("weekday", 4),
     )
+
+    # 实例化策略 (按 weighting 选择 equal=Topk Dropout / score_weighted=自定义)
+    strategy = _build_strategy(st_config, pred_score_shifted)
 
     # 合并 exchange_kwargs
     exchange_kwargs = dict(bt_config["exchange_kwargs"])
@@ -480,11 +574,14 @@ def run_backtest_from_recorder(recorder) -> Dict:
     # 过滤不可交易标的（停牌、ST、次新）
     pred_shifted = _filter_untradable_stocks(pred_shifted)
 
-    strategy = TopkDropoutStrategy(
-        signal=pred_shifted,
-        topk=st_config["topk"],
-        n_drop=st_config["n_drop"],
+    rebal = st_config.get("rebalance", {})
+    pred_shifted = _apply_rebalance_frequency(
+        pred_shifted,
+        rebal.get("frequency", "day"),
+        rebal.get("weekday", 4),
     )
+
+    strategy = _build_strategy(st_config, pred_shifted)
 
     # 加载基准收益率，作为 Series 传入避免 Qlib 内部查找失败
     bench_returns = _load_benchmark_returns(

@@ -52,7 +52,22 @@ def get_infer_processors(config: Optional[dict] = None) -> List[Dict[str, Any]]:
         })
         logger.info("预处理: Z-Score标准化")
 
-    # 2. 缺失值填充
+    # 2. 截面中性化 (cross-sectional neutralization)
+    # 注: 真正的"行业中性化"需要行业代码字段, 当前 AKShare 数据未注入,
+    # 因此这里提供"截面 Z-score"中性化 — 每日截面去均值除标准差,
+    # 移除全市场系统性偏差。配置项 industry 当前未生效, 保留以兼容。
+    neutralize = preproc.get("neutralize", {})
+    if neutralize.get("enabled", False):
+        processors.append({
+            "class": "CSZScoreNorm",
+            "module_path": "qlib.data.dataset.processor",
+            "kwargs": {"fields_group": "feature"},
+        })
+        logger.info(
+            f"预处理: 截面 Z-Score 中性化 (industry={neutralize.get('industry', 'n/a')} 暂未接入)"
+        )
+
+    # 3. 缺失值填充
     fillna = preproc.get("fillna", {})
     if fillna.get("method") in ("ffill_then_median", "median"):
         processors.append({
