@@ -8,7 +8,16 @@ strategy:
   n_drop: 1             # 每期最多换出股票数 (仅 topk_dropout, 降低换手率)
 
   # 组合权重
-  weighting: "equal"    # equal / score_weighted
+  # equal:          TopkDropout 等权 (默认)
+  # score_weighted: 预测分数 softmax 加权
+  # inv:            逆波动率加权 (推荐，稳健，无需调参)
+  # rp:             风险平价 (等风险贡献)
+  # gmv:            全局最小方差
+  # mvo:            均值方差优化 (用预测分数作为期望收益)
+  weighting: "equal"
+
+  # 投资组合优化器参数 (weighting 为 inv/rp/gmv/mvo 时生效)
+  optimizer_lookback: 60  # 计算协方差使用的历史天数
 
   # 调仓频率
   rebalance:

@@ -20,6 +20,7 @@ from utils.helpers import get_model_config, get_data_config, ensure_dir, PROJECT
 from model.lgbm_model import get_lgbm_model_config
 from model.linear_model import get_linear_model_config
 from model.mlp_model import get_mlp_model_config
+from model.double_ensemble_model import get_double_ensemble_config
 from factors.alpha158 import get_alpha158_handler_config, get_alpha158_with_custom_config
 from factors.custom_factors import get_custom_factor_expressions
 
@@ -32,6 +33,7 @@ MODEL_REGISTRY = {
     "lgbm": get_lgbm_model_config,
     "linear": get_linear_model_config,
     "mlp": get_mlp_model_config,
+    "double_ensemble": get_double_ensemble_config,
 }
 
 

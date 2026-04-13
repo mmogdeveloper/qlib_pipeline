@@ -261,16 +261,85 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
+_OPTIMIZER_METHODS = {"gmv", "mvo", "rp", "inv"}
+
+
+def _precompute_returns(
+    instruments: list,
+    start_date: str,
+    end_date: str,
+    lookback_days: int = 60,
+) -> Optional[pd.DataFrame]:
+    """预计算历史日收益率矩阵，供 OptimizedWeightStrategy 使用
+
+    向前多取 lookback_days*2 天，确保回测开始时已有足够的历史数据。
+
+    Returns:
+        pivot DataFrame: index=datetime, columns=instrument, values=日收益率
+        失败时返回 None
+    """
+    from qlib.data import D
+
+    try:
+        extended_start = (
+            pd.Timestamp(start_date) - pd.Timedelta(days=lookback_days * 2)
+        ).strftime("%Y-%m-%d")
+
+        close_df = D.features(
+            instruments, ["$close"],
+            start_time=extended_start, end_time=end_date,
+        )
+        if close_df is None or close_df.empty:
+            return None
+
+        close_df.columns = ["close"]
+        if isinstance(close_df.index, pd.MultiIndex):
+            if list(close_df.index.names) == ["instrument", "datetime"]:
+                close_df = close_df.swaplevel().sort_index()
+
+        pivot = close_df["close"].unstack(level="instrument")
+        ret = pivot.pct_change()
+        logger.info(
+            f"预计算历史收益率矩阵: {len(ret)} 天 × {len(ret.columns)} 只股票"
+        )
+        return ret
+    except Exception as e:
+        logger.warning(f"预计算历史收益率失败: {e}")
+        return None
+
+
 def _build_strategy(st_config: dict, signal):
     """根据 weighting 配置实例化合适的策略
 
-    - equal: TopkDropoutStrategy (Qlib 内置, 等权)
-    - score_weighted: TopkScoreWeightedStrategy (本项目自定义, WeightStrategyBase)
+    - equal:        TopkDropoutStrategy (Qlib 内置, 等权)
+    - score_weighted: TopkScoreWeightedStrategy (分数加权)
+    - inv / gmv / rp / mvo: OptimizedWeightStrategy (PortfolioOptimizer)
     """
     from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
 
     weighting = st_config.get("weighting", "equal")
     topk = st_config["topk"]
+
+    if weighting in _OPTIMIZER_METHODS:
+        from signal_gen.strategies import OptimizedWeightStrategy
+
+        instruments = signal.index.get_level_values(1).unique().tolist()
+        dates = signal.index.get_level_values(0)
+        lookback = st_config.get("optimizer_lookback", 60)
+
+        ret_df = _precompute_returns(
+            instruments,
+            str(dates.min())[:10],
+            str(dates.max())[:10],
+            lookback_days=lookback,
+        )
+        logger.info(
+            f"策略: PortfolioOptimizer ({weighting}), topk={topk}, lookback={lookback}"
+        )
+        return OptimizedWeightStrategy(
+            signal=signal, topk=topk, method=weighting,
+            lookback=lookback, ret_df=ret_df,
+        )
 
     if weighting == "score_weighted":
         from signal_gen.strategies import TopkScoreWeightedStrategy
