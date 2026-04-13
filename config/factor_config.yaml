@@ -48,6 +48,24 @@ factor:
         expression: "Mean($vwap, 10)"
         description: "10日均VWAP"
 
+  # 动态因子过滤（训练前自动过滤弱因子和冗余因子）
+  #
+  # 工作流：
+  #   1. 先运行 python analysis/factor_ic_analysis.py --include-alpha158-sample
+  #   2. 训练时 get_custom_factor_expressions() 读取生成的 CSV 自动过滤
+  #
+  # 过滤规则（两道）：
+  #   1. ICIR 阈值：|ICIR| < icir_min_abs 的因子直接丢弃
+  #   2. 去重：IC 时序相关性 > corr_max 的因子对，保留 ICIR 绝对值更高的那个
+  #      （同时去掉与 Alpha158 代表性因子高度重复的自定义因子）
+  auto_filter:
+    enabled: true
+    ic_summary_path: "reports/factor_ic_summary.csv"   # factor_ic_analysis.py 的输出
+    ic_series_path: "reports/factor_ic_series.csv"     # IC 时序，用于去重
+    icir_min_abs: 0.1        # |ICIR| 低于此值直接丢弃（建议 0.1~0.2）
+    corr_max: 0.90           # IC 时序相关系数超过此值视为冗余，保留 ICIR 更高的
+    fallback_on_missing: true  # CSV 不存在时回退到全量因子（不报错，仅警告）
+
   # 因子预处理
   preprocessing:
     fillna:

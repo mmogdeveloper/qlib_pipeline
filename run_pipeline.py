@@ -79,7 +79,11 @@ def stage_data(args):
 
 
 def stage_model(args):
-    """阶段2+3: 因子 + 模型训练"""
+    """阶段2+3: 因子 + 模型训练
+
+    若从 run_all() 调用，因子 IC 分析已在上游运行；
+    若单独执行 --stage model，此处自动补跑一次。
+    """
     logger.info("=" * 60)
     logger.info("【阶段2+3】因子构建 + 模型训练")
     logger.info("=" * 60)
@@ -87,9 +91,14 @@ def stage_model(args):
     from data.data_loader import get_data_loader
     from model.model_trainer import train_and_predict, train_and_predict_rolling
 
-    # 初始化 Qlib
+    # 初始化 Qlib（因子 IC 分析也需要，先于分析运行）
     loader = get_data_loader()
     loader.init_qlib()
+
+    # 单独运行 --stage model 时，补跑因子 IC 分析
+    # run_all() 调用时已在上游执行，_run_pre_factor_ic 内部会检查 skip_factor_ic
+    if not getattr(args, "_factor_ic_done", False):
+        _run_pre_factor_ic(args)
 
     # 训练模型
     model_name = args.model or get_model_config().get("default", "lgbm")
@@ -465,6 +474,57 @@ def stage_topk_sensitivity(args, recorder=None):
     return csv_path
 
 
+def stage_ndrop_sensitivity(args, recorder=None):
+    """n_drop 敏感性分析: 对同一份 pred 用不同 n_drop 值回测，量化换手约束对 alpha 的衰减"""
+    logger.info("=" * 60)
+    logger.info("【n_drop 敏感性分析】")
+    logger.info("=" * 60)
+
+    from data.data_loader import get_data_loader
+    get_data_loader().init_qlib()
+
+    if recorder is None:
+        recorder = _get_recorder(args)
+
+    from analysis.ndrop_sensitivity import run_sensitivity, _save_results
+
+    n_drops = getattr(args, "n_drops", None) or [1, 3, 5, 10, 20]
+    df = run_sensitivity(
+        model_name=args.model or "lgbm",
+        n_drops=n_drops,
+        rolling=getattr(args, "rolling", False),
+    )
+    if not df.empty:
+        import pandas as pd
+        output_dir = ensure_dir(PROJECT_ROOT / "reports")
+        _save_results(df, output_dir)
+        logger.info("\n" + df.to_string(float_format="{:.4f}".format))
+    return df
+
+
+def stage_factor_ic(args):
+    """单因子 IC 分析: 计算每个自定义因子的截面 IC，识别弱因子和冗余因子"""
+    logger.info("=" * 60)
+    logger.info("【单因子 IC 分析】")
+    logger.info("=" * 60)
+
+    from analysis.factor_ic_analysis import run_factor_ic_analysis, _save_results
+
+    summary_df, ic_series_df = run_factor_ic_analysis(
+        start=getattr(args, "ic_start", None),
+        end=getattr(args, "ic_end", None),
+        include_alpha158_sample=getattr(args, "include_alpha158_sample", False),
+        method=getattr(args, "ic_method", "spearman"),
+    )
+    if not summary_df.empty:
+        output_dir = ensure_dir(PROJECT_ROOT / "reports")
+        _save_results(summary_df, ic_series_df, output_dir)
+        display_cols = ["IC均值", "ICIR", "IC>0比例", "有效天数"]
+        display_cols = [c for c in display_cols if c in summary_df.columns]
+        logger.info("\n" + summary_df[display_cols].to_string(float_format="{:.4f}".format))
+    return summary_df
+
+
 def stage_regime(args, recorder=None):
     """市场环境过滤回测: 仅在大盘趋势向好时满仓，否则降低仓位或空仓
 
@@ -635,6 +695,56 @@ def stage_regime(args, recorder=None):
     return csv_path
 
 
+def _run_pre_factor_ic(args):
+    """训练前因子 IC 分析（使用验证集，避免前视偏差）
+
+    将 IC 分析结果写入 reports/factor_ic_summary.csv 和
+    reports/factor_ic_series.csv，供 get_custom_factor_expressions()
+    的 auto_filter 在加载因子时读取。
+
+    使用验证集而非测试集的原因：
+    - 因子筛选属于建模决策，必须基于训练/验证期的数据
+    - 若使用测试集 IC 来选因子，模型训练实质上看到了未来信息
+    """
+    if getattr(args, "no_custom_factors", False):
+        logger.info("--no-custom-factors 已指定，跳过因子 IC 分析")
+        return
+
+    if getattr(args, "skip_factor_ic", False):
+        logger.info("--skip-factor-ic 已指定，跳过因子 IC 分析")
+        return
+
+    from utils.helpers import get_data_config
+    d_config = get_data_config()
+    valid = d_config["split"]["valid"]
+
+    logger.info("=" * 60)
+    logger.info("【训练前因子 IC 分析】使用验证集: "
+                f"{valid['start']} ~ {valid['end']}")
+    logger.info("=" * 60)
+
+    from analysis.factor_ic_analysis import run_factor_ic_analysis, _save_results
+
+    summary_df, ic_series_df = run_factor_ic_analysis(
+        start=valid["start"],
+        end=valid["end"],
+        include_alpha158_sample=True,   # 始终对比 Alpha158，用于去重
+        method=getattr(args, "ic_method", "spearman"),
+    )
+
+    if summary_df.empty:
+        logger.warning("因子 IC 分析无结果，将使用全量候选因子训练")
+        return
+
+    output_dir = ensure_dir(PROJECT_ROOT / "reports")
+    _save_results(summary_df, ic_series_df, output_dir)
+
+    display_cols = ["IC均值", "ICIR", "IC>0比例", "有效天数"]
+    display_cols = [c for c in display_cols if c in summary_df.columns]
+    logger.info("因子 IC 汇总（验证集）：\n" +
+                summary_df[display_cols].to_string(float_format="{:.4f}".format))
+
+
 def run_all(args):
     """运行全流水线"""
     logger.info("#" * 60)
@@ -647,7 +757,11 @@ def run_all(args):
     else:
         logger.info("跳过数据阶段")
 
-    # 阶段2+3: 因子 + 模型
+    # 阶段2: 训练前因子 IC 分析（刷新过滤 CSV，模型训练时 auto_filter 会读取）
+    _run_pre_factor_ic(args)
+    args._factor_ic_done = True   # 标记已完成，stage_model 内不重复运行
+
+    # 阶段3: 因子 + 模型训练
     recorder = stage_model(args)
 
     # 阶段4: 回测
@@ -660,6 +774,14 @@ def run_all(args):
     # 可选: TopK 参数敏感性分析
     if args.topk_sensitivity:
         stage_topk_sensitivity(args, recorder)
+
+    # 可选: n_drop 敏感性分析
+    if args.ndrop_sensitivity:
+        stage_ndrop_sensitivity(args, recorder)
+
+    # 可选: 单因子 IC 分析
+    if args.factor_ic:
+        stage_factor_ic(args)
 
     # 可选: 市场环境过滤分析
     if args.regime:
@@ -692,6 +814,13 @@ def main():
   python run_pipeline.py --stage topk-sensitivity              # 单独运行 TopK 参数敏感性分析
   python run_pipeline.py --stage regime                        # 单独运行市场环境过滤分析
   python run_pipeline.py --stage all --skip-data --topk-sensitivity --regime  # 全部分析
+  python run_pipeline.py --stage ndrop-sensitivity                            # n_drop 敏感性分析
+  python run_pipeline.py --stage ndrop-sensitivity --n-drops 1 3 5 10        # 指定 n_drop 候选值
+  python run_pipeline.py --stage factor-ic                                    # 单因子 IC 分析
+  python run_pipeline.py --stage factor-ic --include-alpha158-sample          # 含 Alpha158 对比
+  python run_pipeline.py --stage all --skip-data --ndrop-sensitivity --factor-ic  # 含两项分析
+  python run_pipeline.py --stage model                    # 自动先做因子 IC 分析再训练
+  python run_pipeline.py --stage model --skip-factor-ic   # 跳过因子分析直接训练
         """,
     )
 
@@ -700,7 +829,8 @@ def main():
         type=str,
         default="all",
         choices=["all", "data", "model", "backtest", "evaluate",
-                 "sensitivity", "topk-sensitivity", "regime"],
+                 "sensitivity", "topk-sensitivity", "regime",
+                 "ndrop-sensitivity", "factor-ic"],
         help="运行阶段 (default: all)",
     )
     parser.add_argument("--model", type=str, choices=["lgbm", "linear", "mlp"],
@@ -711,10 +841,27 @@ def main():
                         help="跳过数据下载阶段")
     parser.add_argument("--no-custom-factors", action="store_true",
                         help="不使用自定义因子，仅 Alpha158")
+    parser.add_argument("--skip-factor-ic", action="store_true",
+                        help="跳过训练前因子 IC 分析（使用已有 CSV 或全量因子）")
     parser.add_argument("--rebalance", type=str, choices=["day", "week", "month"],
                         help="覆盖调仓频率 (降低频率可减少换手率)")
     parser.add_argument("--n-drop", type=int,
                         help="覆盖每期最多换出股票数 (降低可减少换手率)")
+    parser.add_argument("--ndrop-sensitivity", action="store_true",
+                        help="运行 n_drop 敏感性分析，量化换手约束对 alpha 的衰减")
+    parser.add_argument("--n-drops", nargs="+", type=int, default=None,
+                        help="n_drop 敏感性分析的候选值列表，默认 1 3 5 10 20")
+    parser.add_argument("--factor-ic", action="store_true",
+                        help="运行单因子 IC 分析，识别弱因子和冗余因子")
+    parser.add_argument("--ic-start", type=str, default=None,
+                        help="因子 IC 分析的开始日期，默认使用测试集起始")
+    parser.add_argument("--ic-end", type=str, default=None,
+                        help="因子 IC 分析的结束日期，默认使用测试集结束")
+    parser.add_argument("--include-alpha158-sample", action="store_true",
+                        help="因子 IC 分析时同时分析 Alpha158 代表性因子（对比增量信息）")
+    parser.add_argument("--ic-method", type=str, default="spearman",
+                        choices=["spearman", "pearson"],
+                        help="因子 IC 计算方法（默认 spearman / Rank IC）")
     parser.add_argument("--sensitivity", action="store_true",
                         help="运行成本敏感性分析 (多组成本参数回测)")
     parser.add_argument("--topk-sensitivity", action="store_true",
@@ -746,6 +893,10 @@ def main():
         stage_topk_sensitivity(args)
     elif args.stage == "regime":
         stage_regime(args)
+    elif args.stage == "ndrop-sensitivity":
+        stage_ndrop_sensitivity(args)
+    elif args.stage == "factor-ic":
+        stage_factor_ic(args)
 
 
 if __name__ == "__main__":
