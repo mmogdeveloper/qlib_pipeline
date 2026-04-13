@@ -164,9 +164,9 @@ def _filter_untradable_stocks(pred_score: pd.DataFrame) -> pd.DataFrame:
 
             mask = mask & ~ipo_mask
             n_ipo = ipo_mask.sum()
-            logger.info(f"次新股过滤（{ipo_days}日）: ���除 {n_ipo} 条记录")
+            logger.info(f"次新股过滤（{ipo_days}日）: 移除 {n_ipo} 条记录")
         except Exception as e:
-            logger.warning(f"次新股过滤失���: {e}")
+            logger.warning(f"次新股过滤失败: {e}")
 
     filtered = pred_score.loc[mask]
     total_after = len(filtered)
