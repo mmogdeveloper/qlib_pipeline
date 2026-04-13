@@ -5,9 +5,9 @@ strategy:
 
   # TopK 参数
   topk: 20              # 每期持仓股票数
-  n_drop: 3             # 每期最多换出股票数 (仅 topk_dropout, 降低换手率)
-                        # 5日收益率 label 下，n_drop=1 会导致信号执行严重滞后
-                        # (20只持仓换完一轮需要20天)；n_drop=3 在换手与响应间取平衡
+  n_drop: 1             # 每期最多换出股票数 (仅 topk_dropout, 降低换手率)
+                        # IC=0.025 水平下，n_drop=1 起到隐性信号平滑，成本最优
+                        # n_drop=3 换手率约3x，成本侵蚀从2.3pct/年升至7.1pct/年
 
   # 组合权重
   # equal:          TopkDropout 等权 (默认)

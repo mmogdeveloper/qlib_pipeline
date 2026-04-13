@@ -44,7 +44,7 @@ def get_model_config_by_name(model_name: str, config: Optional[dict] = None) -> 
     return MODEL_REGISTRY[model_name](config)
 
 
-def _save_feature_importance(model, model_name: str) -> None:
+def _save_feature_importance(model, model_name: str, dataset=None) -> None:
     """训练完成后导出 LightGBM feature importance（gain口径）到 CSV
 
     输出格式：
@@ -66,6 +66,21 @@ def _save_feature_importance(model, model_name: str) -> None:
     try:
         gain = booster.feature_importance(importance_type="gain")
         names = booster.feature_name()
+
+        # Qlib 用 numpy array 训练 LightGBM，导致列名变成 Column_N
+        # 从 dataset 拿真实列名替换
+        if dataset is not None and all(n.startswith("Column_") for n in names):
+            try:
+                feat_df = dataset.prepare("train", col_set="feature")
+                real_names = feat_df.columns.tolist()
+                if len(real_names) == len(names):
+                    names = real_names
+                else:
+                    logger.warning(
+                        f"feature importance: 列数不匹配 ({len(real_names)} vs {len(names)})，保留 Column_N"
+                    )
+            except Exception as e:
+                logger.warning(f"feature importance: 无法从 dataset 获取列名，保留 Column_N: {e}")
         total_gain = gain.sum()
         if total_gain == 0:
             logger.warning("feature importance: 所有因子 gain 均为 0，跳过保存")
@@ -192,7 +207,7 @@ def train_and_predict(
         logger.info(f"模型已保存: {model_path}")
 
         # 导出 feature importance（仅 LightGBM）
-        _save_feature_importance(model, model_name)
+        _save_feature_importance(model, model_name, dataset=dataset)
 
         recorder = R.get_recorder()
 
@@ -302,7 +317,7 @@ def train_and_predict_rolling(
                 test=str(segs["test"]),
             )
             model.fit(dataset)
-            _save_feature_importance(model, model_name)
+            _save_feature_importance(model, model_name, dataset=dataset)
 
             recorder = R.get_recorder()
             sr = SignalRecord(model=model, dataset=dataset, recorder=recorder)
