@@ -117,16 +117,28 @@ def _format_robustness_summary() -> list:
                     lines.append("    " + "  ".join(cells))
 
                 if {"regime_filter", "max_dd_with_cost"}.issubset(df.columns):
-                    base = df[df["regime_filter"].astype(str).str.contains("none|off|baseline|False", case=False, na=False)]
+                    base = df[df["regime_filter"].astype(str).str.contains(
+                        "none|off|baseline|False|无过滤|基准", case=False, na=False
+                    )]
                     filt = df[~df.index.isin(base.index)]
                     if not base.empty and not filt.empty:
                         dd_base = base["max_dd_with_cost"].iloc[0]
                         dd_best = filt["max_dd_with_cost"].max()  # 回撤是负数, max 即最浅
                         improve = dd_best - dd_base
-                        verdict = "有效" if improve > 0.01 else ("微弱" if improve > 0 else "无效")
-                        goals["市场环境过滤"] = (verdict, f"最大回撤改善 {improve*100:+.2f}pct")
-                        goals["回撤控制"] = (verdict, f"过滤后最浅回撤 {dd_best*100:.2f}%")
-                        lines.append(f"    → 回撤改善 {improve*100:+.2f}pct  判定: {verdict}")
+                        regime_verdict = "有效" if improve > 0.01 else ("微弱" if improve > 0 else "无效")
+                        goals["市场环境过滤"] = (regime_verdict, f"最大回撤改善 {improve*100:+.2f}pct")
+                        lines.append(f"    → 回撤改善 {improve*100:+.2f}pct  判定: {regime_verdict}")
+                    if not base.empty:
+                        dd_base = base["max_dd_with_cost"].iloc[0]
+                        if dd_base > -0.10:
+                            dd_verdict, dd_detail = "优秀", f"最大回撤 {dd_base*100:.2f}% (<10%)"
+                        elif dd_base > -0.15:
+                            dd_verdict, dd_detail = "良好", f"最大回撤 {dd_base*100:.2f}% (<15%)"
+                        elif dd_base > -0.20:
+                            dd_verdict, dd_detail = "一般", f"最大回撤 {dd_base*100:.2f}% (<20%)"
+                        else:
+                            dd_verdict, dd_detail = "较弱", f"最大回撤 {dd_base*100:.2f}% (>20%)"
+                        goals["回撤控制"] = (dd_verdict, dd_detail)
             lines.append("")
         except Exception as e:
             lines.append(f"  (读取 {regime_csv.name} 失败: {e})")
@@ -154,8 +166,11 @@ def _format_robustness_summary() -> list:
             lines.append(f"    [ ? ] {goal:<14s}  未评估")
         else:
             verdict, detail = res
-            mark = {"稳健": "✔", "较稳健": "✔", "有效": "✔",
-                    "敏感": "✗", "微弱": "△", "无效": "✗"}.get(verdict, "?")
+            mark = {
+                "稳健": "✔", "较稳健": "✔", "有效": "✔", "优秀": "✔", "良好": "✔",
+                "敏感": "✗", "无效": "✗", "较弱": "✗",
+                "微弱": "△", "一般": "△",
+            }.get(verdict, "?")
             lines.append(f"    [ {mark} ] {goal:<14s}  {verdict:<6s}  {detail}")
 
     return lines
@@ -305,6 +320,10 @@ def generate_text_report(
     lines.append("-" * 40)
     # 按类别分组输出，优先展示含成本超额收益
     _pct_keys = {"annualized_return", "max_drawdown", "mean", "std"}
+    _rename = {
+        "return_with_cost/information_ratio": "return_with_cost/sharpe_ratio",
+        "return_without_cost/information_ratio": "return_without_cost/sharpe_ratio",
+    }
     for name, val in sorted(metrics.items()):
         if isinstance(val, float):
             metric_short = name.split("/")[-1] if "/" in name else name
@@ -314,7 +333,8 @@ def generate_text_report(
                 formatted = f"{val:.4f}"
         else:
             formatted = str(val)
-        lines.append(f"  {name:<45s} {formatted}")
+        display_name = _rename.get(name, name)
+        lines.append(f"  {display_name:<45s} {formatted}")
 
     # ── IC 指标 ──
     if ic_summary:

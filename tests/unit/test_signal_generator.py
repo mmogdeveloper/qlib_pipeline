@@ -84,6 +84,47 @@ class TestGenerateTradeSignals:
                     f"rank={i+2} score={scores[i+1]}"
                 )
 
+    def test_ndrop_limits_turnover(self):
+        """n_drop=1 时，即使多只持仓跌出 topk，每期最多只替换 1 只"""
+        from signal_gen.signal_generator import generate_trade_signals
+
+        dates = make_trading_dates(2)
+        instruments = ["A", "B", "C", "D", "E", "F"]
+        # Day 1: A=6,B=5,C=4,D=3,E=2,F=1 → topk=3 → 持仓 {A,B,C}
+        # Day 2: D=6,E=5,F=4,A=3,B=2,C=1 → raw top-3={D,E,F}
+        #   outside_topk=[A,B,C], entering=[D,E,F], n_drop=1 → 只替换1只
+        #   C 排名最差(rank=6) → 卖出 C，买入 D → 新持仓 {A,B,D}
+        rows = []
+        for inst, score in zip(instruments, [6, 5, 4, 3, 2, 1]):
+            rows.append({"datetime": dates[0], "instrument": inst, "score": score})
+        for inst, score in zip(instruments, [3, 2, 1, 6, 5, 4]):
+            rows.append({"datetime": dates[1], "instrument": inst, "score": score})
+
+        pred = pd.DataFrame(rows).set_index(["datetime", "instrument"])
+        config = {"topk": 3, "n_drop": 1}
+        df = generate_trade_signals(pred, config=config)
+
+        day2 = df[df["date"] == dates[1]]
+
+        # 持仓应仍为 3 只
+        assert len(day2[day2["signal"] == "买入"]) == 3
+
+        # 新买入只有 1 只（D，排名第1的新进股）
+        new_buys = day2[day2["change"] == "新买入"]
+        assert len(new_buys) == 1
+        assert new_buys.iloc[0]["instrument"] == "D"
+
+        # 新卖出只有 1 只（C，持仓中排名最差的落选股）
+        new_sells = day2[day2["change"] == "新卖出"]
+        assert len(new_sells) == 1
+        assert new_sells.iloc[0]["instrument"] == "C"
+
+        # A、B 继续持仓，无变动
+        for inst in ["A", "B"]:
+            row = day2[day2["instrument"] == inst]
+            assert row.iloc[0]["signal"] == "买入"
+            assert row.iloc[0]["change"] == ""
+
     def test_series_input(self):
         """pred_score 为 Series 时也能正常工作"""
         from signal_gen.signal_generator import generate_trade_signals
