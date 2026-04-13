@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+import pandas as pd
 from loguru import logger
 
 from utils.helpers import (
@@ -15,6 +16,149 @@ from utils.helpers import (
     get_strategy_config,
     get_backtest_config,
 )
+
+
+def _find_latest_csv(pattern: str) -> Optional[Path]:
+    """在 reports/ 下找最新的匹配 CSV"""
+    files = sorted((PROJECT_ROOT / "reports").glob(pattern))
+    return files[-1] if files else None
+
+
+def _format_monthly_returns(report_df: pd.DataFrame) -> list:
+    """生成月度/年度收益热力图表 (纯文本)"""
+    lines = []
+    if report_df is None or "return" not in report_df.columns:
+        return lines
+
+    col = "return"
+    if "return_wo_cost" in report_df.columns:
+        col = "return_wo_cost"
+    if "excess_return_with_cost" in report_df.columns:
+        col = "excess_return_with_cost"
+
+    df = report_df[[col]].copy()
+    df.index = pd.to_datetime(df.index)
+    monthly = (1 + df[col]).resample("ME").prod() - 1
+
+    if monthly.empty:
+        return lines
+
+    pivot = pd.DataFrame({
+        "year": monthly.index.year,
+        "month": monthly.index.month,
+        "ret": monthly.values,
+    }).pivot(index="year", columns="month", values="ret")
+
+    lines.append(f"  指标口径: {col}")
+    lines.append("  " + "年份   " + "  ".join(f"{m:>6d}月" for m in range(1, 13)) + "   年度")
+    lines.append("  " + "-" * 100)
+    for year, row in pivot.iterrows():
+        year_ret = (1 + row.dropna()).prod() - 1
+        cells = []
+        for m in range(1, 13):
+            v = row.get(m)
+            if pd.isna(v):
+                cells.append(f"{'—':>7s}")
+            else:
+                cells.append(f"{v*100:>+6.2f}%")
+        lines.append(f"  {year}  " + "  ".join(cells) + f"  {year_ret*100:>+6.2f}%")
+    return lines
+
+
+def _format_robustness_summary() -> list:
+    """读取 sensitivity / topk / regime CSV, 汇总稳健性结论"""
+    lines = []
+    goals = {"topk稳健性": None, "市场环境过滤": None, "回撤控制": None}
+
+    # ── TopK 敏感性 ──
+    topk_csv = _find_latest_csv("topk_sensitivity_*.csv")
+    if topk_csv:
+        try:
+            df = pd.read_csv(topk_csv)
+            lines.append(f"  ▸ TopK 参数敏感性  (来源: {topk_csv.name})")
+            cols = [c for c in ["topk", "n_drop", "ann_return_with_cost",
+                                "sharpe_with_cost", "max_dd_with_cost"] if c in df.columns]
+            if cols:
+                lines.append("    " + "  ".join(f"{c:>20s}" for c in cols))
+                for _, row in df.iterrows():
+                    cells = []
+                    for c in cols:
+                        v = row[c]
+                        cells.append(f"{v:>20.4f}" if isinstance(v, (int, float)) else f"{str(v):>20s}")
+                    lines.append("    " + "  ".join(cells))
+
+                if "sharpe_with_cost" in df.columns:
+                    sharpes = df["sharpe_with_cost"].dropna()
+                    if len(sharpes) >= 2:
+                        std, mean = sharpes.std(), sharpes.mean()
+                        cv = abs(std / mean) if mean else float("inf")
+                        verdict = "稳健" if cv < 0.3 else ("较稳健" if cv < 0.5 else "敏感")
+                        goals["topk稳健性"] = (verdict, f"Sharpe CV={cv:.2f} (mean={mean:.2f})")
+                        lines.append(f"    → Sharpe 离散系数 CV={cv:.2f}  判定: {verdict}")
+            lines.append("")
+        except Exception as e:
+            lines.append(f"  (读取 {topk_csv.name} 失败: {e})")
+
+    # ── Regime 过滤 ──
+    regime_csv = _find_latest_csv("regime_*.csv")
+    if regime_csv:
+        try:
+            df = pd.read_csv(regime_csv)
+            lines.append(f"  ▸ 市场环境过滤  (来源: {regime_csv.name})")
+            cols = [c for c in ["regime_filter", "ann_return_with_cost",
+                                "sharpe_with_cost", "max_dd_with_cost"] if c in df.columns]
+            if cols:
+                lines.append("    " + "  ".join(f"{c:>22s}" for c in cols))
+                for _, row in df.iterrows():
+                    cells = []
+                    for c in cols:
+                        v = row[c]
+                        cells.append(f"{v:>22.4f}" if isinstance(v, (int, float)) else f"{str(v):>22s}")
+                    lines.append("    " + "  ".join(cells))
+
+                if {"regime_filter", "max_dd_with_cost"}.issubset(df.columns):
+                    base = df[df["regime_filter"].astype(str).str.contains("none|off|baseline|False", case=False, na=False)]
+                    filt = df[~df.index.isin(base.index)]
+                    if not base.empty and not filt.empty:
+                        dd_base = base["max_dd_with_cost"].iloc[0]
+                        dd_best = filt["max_dd_with_cost"].max()  # 回撤是负数, max 即最浅
+                        improve = dd_best - dd_base
+                        verdict = "有效" if improve > 0.01 else ("微弱" if improve > 0 else "无效")
+                        goals["市场环境过滤"] = (verdict, f"最大回撤改善 {improve*100:+.2f}pct")
+                        goals["回撤控制"] = (verdict, f"过滤后最浅回撤 {dd_best*100:.2f}%")
+                        lines.append(f"    → 回撤改善 {improve*100:+.2f}pct  判定: {verdict}")
+            lines.append("")
+        except Exception as e:
+            lines.append(f"  (读取 {regime_csv.name} 失败: {e})")
+
+    # ── 成本敏感性 ──
+    cost_csv = _find_latest_csv("sensitivity_*.csv")
+    if cost_csv:
+        try:
+            df = pd.read_csv(cost_csv)
+            lines.append(f"  ▸ 交易成本敏感性  (来源: {cost_csv.name})")
+            lines.append(f"    共 {len(df)} 组成本参数, 详见 CSV")
+            lines.append("")
+        except Exception:
+            pass
+
+    if not lines:
+        lines.append("  (未发现 sensitivity / topk / regime CSV, 建议运行:")
+        lines.append("     python run_pipeline.py --stage all --skip-data --topk-sensitivity --regime)")
+        return lines
+
+    # ── 目标达成评分 ──
+    lines.append("  ▸ 策略目标达成评分:")
+    for goal, res in goals.items():
+        if res is None:
+            lines.append(f"    [ ? ] {goal:<14s}  未评估")
+        else:
+            verdict, detail = res
+            mark = {"稳健": "✔", "较稳健": "✔", "有效": "✔",
+                    "敏感": "✗", "微弱": "△", "无效": "✗"}.get(verdict, "?")
+            lines.append(f"    [ {mark} ] {goal:<14s}  {verdict:<6s}  {detail}")
+
+    return lines
 
 
 def _format_strategy_logic() -> list:
@@ -122,6 +266,7 @@ def generate_text_report(
     output_dir: Optional[str] = None,
     trade_records=None,
     trade_signals=None,
+    report_df: Optional[pd.DataFrame] = None,
 ) -> str:
     """生成纯文本回测报告
 
@@ -202,6 +347,20 @@ def generate_text_report(
         for name, val in ic_summary.items():
             if name not in shown and val is not None:
                 lines.append(f"  {name:<20s} {val:.4f}")
+
+    # ── 稳健性汇总 ──
+    lines.append("")
+    lines.append("【稳健性汇总 (TopK / Regime / 成本)】")
+    lines.append("-" * 40)
+    lines.extend(_format_robustness_summary())
+
+    # ── 月度收益热力表 ──
+    monthly_lines = _format_monthly_returns(report_df) if report_df is not None else []
+    if monthly_lines:
+        lines.append("")
+        lines.append("【月度 / 年度收益】")
+        lines.append("-" * 40)
+        lines.extend(monthly_lines)
 
     # ── 策略执行逻辑 ──
     lines.append("")

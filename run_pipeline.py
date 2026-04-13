@@ -261,6 +261,7 @@ def stage_evaluate(args, backtest_result=None, recorder=None):
         metrics, ic_summary=ic_summary,
         trade_records=trade_records,
         trade_signals=trade_signals,
+        report_df=report_df,
     )
     logger.info(f"报告已生成: {report_path}")
 

@@ -4,8 +4,8 @@ strategy:
   type: "topk_dropout"  # topk / topk_dropout
 
   # TopK 参数
-  topk: 30              # 每期持仓股票数
-  n_drop: 3             # 每期最多换出股票数 (仅 topk_dropout, 降低换手率)
+  topk: 20              # 每期持仓股票数
+  n_drop: 1             # 每期最多换出股票数 (仅 topk_dropout, 降低换手率)
 
   # 组合权重
   weighting: "equal"    # equal / score_weighted
