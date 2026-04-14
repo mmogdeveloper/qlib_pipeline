@@ -2,7 +2,7 @@
 import os
 import glob
 
-DIRS = ["logs", "reports"]
+DIRS = ["logs"]
 
 for d in DIRS:
     files = glob.glob(os.path.join(d, "*"))
