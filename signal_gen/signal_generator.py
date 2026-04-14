@@ -57,6 +57,21 @@ def validate_pred_score(pred_score: pd.DataFrame) -> pd.DataFrame:
         f"NaN 占比 {nan_pct:.2%}"
     )
 
+    # 信号分布统计（分位数 + 均值/标准差/偏度）
+    try:
+        values = pred_score.iloc[:, 0] if isinstance(pred_score, pd.DataFrame) else pred_score
+        values = values.dropna()
+        if len(values) > 0:
+            q = values.quantile([0.01, 0.25, 0.5, 0.75, 0.99])
+            logger.info(
+                f"信号分布: mean={values.mean():.4f}, std={values.std():.4f}, "
+                f"skew={values.skew():.3f}, "
+                f"q01={q.iloc[0]:.4f}, q25={q.iloc[1]:.4f}, "
+                f"q50={q.iloc[2]:.4f}, q75={q.iloc[3]:.4f}, q99={q.iloc[4]:.4f}"
+            )
+    except Exception as e:
+        logger.warning(f"信号分布统计失败（不影响流程）: {e}")
+
     config = get_strategy_config()
     if n_instruments < config["topk"]:
         logger.warning(

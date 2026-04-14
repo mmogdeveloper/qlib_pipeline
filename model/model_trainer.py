@@ -12,9 +12,44 @@ Qlib API 调用链：
 """
 
 import pickle
+import time
 from typing import Dict, Any, Optional
 
 from loguru import logger
+
+
+def _log_dataset_stats(dataset, tag: str = "") -> None:
+    """打印 train/valid/test 各段的行数、特征数、NaN 占比"""
+    prefix = f"[{tag}] " if tag else ""
+    try:
+        import pandas as pd
+        for seg in ("train", "valid", "test"):
+            try:
+                feat = dataset.prepare(seg, col_set="feature")
+            except Exception:
+                continue
+            if feat is None or len(feat) == 0:
+                logger.info(f"{prefix}数据集 {seg}: 空")
+                continue
+            n_rows, n_cols = feat.shape
+            nan_pct = feat.isna().to_numpy().mean() * 100
+            idx = feat.index
+            if isinstance(idx, pd.MultiIndex):
+                dates = idx.get_level_values(0)
+                n_dates = dates.nunique()
+                n_inst = idx.get_level_values(1).nunique()
+                date_range = f"{dates.min().date()}~{dates.max().date()}"
+                logger.info(
+                    f"{prefix}数据集 {seg}: rows={n_rows}, features={n_cols}, "
+                    f"dates={n_dates} ({date_range}), instruments={n_inst}, "
+                    f"NaN={nan_pct:.2f}%"
+                )
+            else:
+                logger.info(
+                    f"{prefix}数据集 {seg}: rows={n_rows}, features={n_cols}, NaN={nan_pct:.2f}%"
+                )
+    except Exception as e:
+        logger.warning(f"{prefix}数据集统计打印失败（不影响训练）: {e}")
 
 from utils.helpers import get_model_config, get_data_config, ensure_dir, PROJECT_ROOT
 from model.lgbm_model import get_lgbm_model_config
@@ -47,10 +82,7 @@ def get_model_config_by_name(model_name: str, config: Optional[dict] = None) -> 
 def _save_feature_importance(model, model_name: str, dataset=None) -> None:
     """训练完成后导出 LightGBM feature importance（gain口径）到 CSV
 
-    输出格式：
-        feature, gain, gain_pct
-    gain_pct = 该因子 gain / 所有因子 gain 之和，用于后续自动过滤
-
+    输出列：feature, gain, gain_pct, split, is_custom, category
     仅对 LightGBM 有效；其他模型静默跳过。
     输出路径：reports/feature_importance_<model_name>.csv
     （每次训练覆盖写，滚动验证中最后一折的结果作为最终参考）
@@ -65,14 +97,19 @@ def _save_feature_importance(model, model_name: str, dataset=None) -> None:
 
     try:
         gain = booster.feature_importance(importance_type="gain")
+        split = booster.feature_importance(importance_type="split")
         names = booster.feature_name()
 
         # Qlib 用 numpy array 训练 LightGBM，导致列名变成 Column_N
-        # 从 dataset 拿真实列名替换
+        # 从 dataset 拿真实列名替换；DatasetH columns 可能是 MultiIndex，取最后一层
         if dataset is not None and all(n.startswith("Column_") for n in names):
             try:
                 feat_df = dataset.prepare("train", col_set="feature")
-                real_names = feat_df.columns.tolist()
+                cols = feat_df.columns
+                if isinstance(cols, pd.MultiIndex):
+                    real_names = cols.get_level_values(-1).tolist()
+                else:
+                    real_names = cols.tolist()
                 if len(real_names) == len(names):
                     names = real_names
                 else:
@@ -81,40 +118,79 @@ def _save_feature_importance(model, model_name: str, dataset=None) -> None:
                     )
             except Exception as e:
                 logger.warning(f"feature importance: 无法从 dataset 获取列名，保留 Column_N: {e}")
+
         total_gain = gain.sum()
         if total_gain == 0:
             logger.warning("feature importance: 所有因子 gain 均为 0，跳过保存")
             return
 
+        # 获取自定义因子名集合（失败时 graceful degrade）
+        custom_names: set = set()
+        try:
+            custom_names = {name for _, name in get_custom_factor_expressions()}
+        except Exception as e:
+            logger.warning(f"feature importance: 无法加载自定义因子名，is_custom 列将全为 False: {e}")
+
+        # Alpha158 因子类别前缀映射
+        _CATEGORY_PREFIXES = {
+            "candle":            ("KMID", "KLEN", "KUP", "KLOW", "KSFT"),
+            "price_trend":       ("ROC", "MA", "BETA", "MAX", "MIN"),
+            "volatility":        ("STD", "RSQR", "RESI"),
+            "volume":            ("VMA", "VSTD", "VSUMP", "VSUMN", "VSUMD"),
+            "price_volume_corr": ("CORR", "CORD"),
+        }
+
+        def _get_category(feature_name: str) -> str:
+            if feature_name in custom_names:
+                return "custom"
+            upper = feature_name.upper()
+            for cat, prefixes in _CATEGORY_PREFIXES.items():
+                if any(upper.startswith(p) for p in prefixes):
+                    return cat
+            return "other"
+
         imp = (
-            pd.DataFrame({"feature": names, "gain": gain})
-            .assign(gain_pct=lambda df: df["gain"] / total_gain * 100)
+            pd.DataFrame({"feature": names, "gain": gain, "split": split})
+            .assign(
+                gain_pct=lambda df: df["gain"] / total_gain * 100,
+                is_custom=lambda df: df["feature"].isin(custom_names),
+                category=lambda df: df["feature"].apply(_get_category),
+            )
             .sort_values("gain", ascending=False)
             .reset_index(drop=True)
         )
 
-        reports_dir = ensure_dir(PROJECT_ROOT / "reports")
-        csv_path = reports_dir / f"feature_importance_{model_name}.csv"
-        imp.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        # Top20 日志
+        top20 = imp.head(20)[["feature", "gain", "gain_pct", "split", "is_custom"]]
+        logger.info(f"Feature Importance Top20 (gain%):\n{top20.to_string(index=False)}")
 
-        # 打印 top10 和自定义因子排名（帮助快速诊断）
-        top10 = imp.head(10)[["feature", "gain_pct"]].to_string(index=False)
-        logger.info(f"Feature Importance Top10 (gain%):\n{top10}")
-
-        # 找出 gain_pct < 0.5% 的自定义因子（不在此处删除，由 custom_factors 读取决策）
-        from factors.custom_factors import get_all_factor_fields
-        try:
-            all_custom = {name for _, name in get_all_factor_fields()}
-            weak = imp[(imp["feature"].isin(all_custom)) & (imp["gain_pct"] < 0.5)]
+        # 自定义因子专项汇总
+        custom_imp = imp[imp["is_custom"]]
+        if not custom_imp.empty:
+            custom_total_pct = custom_imp["gain_pct"].sum()
+            custom_top10 = custom_imp.head(10)[["feature", "gain_pct"]].to_string(index=False)
+            logger.info(f"自定义因子贡献汇总: 总占比 {custom_total_pct:.2f}%, Top10:\n{custom_top10}")
+            weak = custom_imp[custom_imp["gain_pct"] < 0.5]
             if not weak.empty:
                 logger.info(
-                    f"自定义因子中 gain_pct<0.5% 的弱因子（将在下次训练前过滤）:\n"
+                    "自定义因子中 gain_pct<0.5% 的弱因子（将在下次训练前过滤）:\n"
                     + weak[["feature", "gain_pct"]].to_string(index=False)
                 )
-        except Exception:
-            pass
+        else:
+            logger.info("自定义因子贡献汇总: 未找到自定义因子")
 
+        # 按类别分组汇总
+        cat_summary = imp.groupby("category")["gain_pct"].sum().sort_values(ascending=False)
+        logger.info(f"按因子类别汇总:\n{cat_summary.to_string()}")
+
+        # 保存 CSV（utf-8-sig 兼容 Excel 中文）
+        reports_dir = ensure_dir(PROJECT_ROOT / "reports")
+        csv_path = reports_dir / f"feature_importance_{model_name}.csv"
+        imp[["feature", "gain", "gain_pct", "split", "is_custom", "category"]].to_csv(
+            csv_path, index=False, encoding="utf-8-sig"
+        )
         logger.info(f"Feature importance 已保存: {csv_path}")
+
     except Exception as e:
         logger.warning(f"导出 feature importance 失败（不影响训练）: {e}")
 
@@ -183,8 +259,10 @@ def train_and_predict(
     # 自定义因子在此步骤就真正计算并进入 DatasetH，与 Alpha158 因子一起
     # 经过 infer_processors (RobustZScoreNorm, Fillna) 预处理
     logger.info("初始化数据集（因子计算中，可能需要几分钟）...")
+    t0 = time.time()
     dataset = init_instance_by_config(workflow["dataset"])
-    logger.info("数据集初始化完成")
+    logger.info(f"数据集初始化完成 (耗时 {time.time()-t0:.1f}s)")
+    _log_dataset_stats(dataset)
 
     # 2. 实例化模型
     logger.info(f"初始化模型: {model_name}")
@@ -196,8 +274,9 @@ def train_and_predict(
 
         # model.fit(dataset): Qlib 模型从 dataset 获取 train/valid 数据训练
         logger.info("开始训练...")
+        t_fit = time.time()
         model.fit(dataset)
-        logger.info("训练完成")
+        logger.info(f"训练完成 (耗时 {time.time()-t_fit:.1f}s)")
 
         # 保存模型
         model_save_dir = ensure_dir(PROJECT_ROOT / "models" / "saved")
@@ -305,7 +384,10 @@ def train_and_predict_rolling(
             logger.info(f"折{i+1}: test_end 为 None，已兜底到 {fallback_end.date()}")
 
         logger.info(f"折{i+1}: 初始化数据集...")
+        t0 = time.time()
         dataset = init_instance_by_config(task["dataset"])
+        logger.info(f"折{i+1}: 数据集初始化完成 (耗时 {time.time()-t0:.1f}s)")
+        _log_dataset_stats(dataset, tag=f"折{i+1}")
 
         logger.info(f"折{i+1}: 训练模型...")
         model = init_instance_by_config(task["model"])
@@ -316,7 +398,9 @@ def train_and_predict_rolling(
                 train=str(segs["train"]), valid=str(segs["valid"]),
                 test=str(segs["test"]),
             )
+            t_fit = time.time()
             model.fit(dataset)
+            logger.info(f"折{i+1}: 训练完成 (耗时 {time.time()-t_fit:.1f}s)")
             _save_feature_importance(model, model_name, dataset=dataset)
 
             recorder = R.get_recorder()

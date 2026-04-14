@@ -144,11 +144,28 @@ class DataHealthChecker:
             "details": {},
         }
 
+        total_rows = 0
+        field_nan_counts: Dict[str, int] = {}
+        field_total_counts: Dict[str, int] = {}
+        all_fields: set = set()
+        date_min, date_max = None, None
+
         for csv_file in csv_files:
             symbol = csv_file.stem
             try:
                 df = pd.read_csv(csv_file, parse_dates=["date"])
                 detail = {}
+
+                # 累计行数、字段、日期范围、每字段 NaN
+                total_rows += len(df)
+                all_fields.update(df.columns.tolist())
+                if not df.empty and "date" in df.columns:
+                    dmin, dmax = df["date"].min(), df["date"].max()
+                    date_min = dmin if date_min is None else min(date_min, dmin)
+                    date_max = dmax if date_max is None else max(date_max, dmax)
+                for col in df.columns:
+                    field_total_counts[col] = field_total_counts.get(col, 0) + len(df)
+                    field_nan_counts[col] = field_nan_counts.get(col, 0) + int(df[col].isna().sum())
 
                 # 1. 缺失交易日
                 missing = self.check_missing_days(df, symbol, trade_dates)
@@ -175,12 +192,27 @@ class DataHealthChecker:
                 logger.error(f"[{symbol}] 健康检查失败: {e}")
 
         # 汇总
+        results["total_rows"] = total_rows
+        results["n_fields"] = len(all_fields)
         logger.info("=" * 60)
         logger.info("健康检查完成:")
         logger.info(f"  总股票数: {results['total_stocks']}")
+        logger.info(f"  总行数: {total_rows}")
+        logger.info(f"  字段数: {len(all_fields)} ({sorted(all_fields)})")
+        if date_min is not None and date_max is not None:
+            logger.info(f"  日期范围: {date_min.date()} ~ {date_max.date()}")
         logger.info(f"  有缺失交易日: {results['stocks_with_missing_days']}")
         logger.info(f"  有异常价格跳变: {results['stocks_with_anomalies']}")
         logger.info(f"  有停牌记录: {results['stocks_with_suspend']}")
+        # 每字段 NaN 率
+        if field_total_counts:
+            logger.info("  字段缺失率:")
+            for col in sorted(field_total_counts.keys()):
+                tot = field_total_counts[col]
+                if tot == 0:
+                    continue
+                pct = field_nan_counts.get(col, 0) / tot * 100
+                logger.info(f"    {col}: {pct:.2f}% ({field_nan_counts.get(col,0)}/{tot})")
         logger.info("=" * 60)
 
         return results

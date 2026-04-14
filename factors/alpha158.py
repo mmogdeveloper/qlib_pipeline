@@ -88,7 +88,10 @@ def get_alpha158_with_custom_config(
             label_expr, factor_config,
         )
 
-    logger.info(f"构建 Alpha158Custom 配置: 158 + {len(custom_fields)} 自定义因子")
+    logger.info(
+        f"构建 Alpha158Custom 配置: Alpha158(158) + 自定义({len(custom_fields)}) "
+        f"= 总计 {158 + len(custom_fields)} 因子"
+    )
 
     return {
         "class": "DatasetH",
