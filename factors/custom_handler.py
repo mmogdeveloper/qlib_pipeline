@@ -56,24 +56,24 @@ class Alpha158Custom(Alpha158):
             logger.info(f"Alpha158Custom: 加载 {len(self._custom_fields)} 个自定义因子")
         super().__init__(**kwargs)
 
-    def _get_fields(self):
-        """覆盖 Alpha158._get_fields()，追加自定义因子
+    def get_feature_config(self):
+        """覆盖 Alpha158.get_feature_config()，追加自定义因子
+
+        Alpha158.__init__ 在构造 QlibDataLoader 时调用该方法获取 feature 表达式,
+        因此必须在 super().__init__ 之前就把 self._custom_fields 准备好(已在 __init__ 中完成)。
 
         Returns:
-            (feature_fields, label_fields) 元组
-            feature_fields: [(expression, name), ...]
-            label_fields: [(expression, name), ...]
+            (fields, names) 元组,与 Alpha158DL.get_feature_config 保持一致
         """
-        # 获取 Alpha158 原始的 158 个因子 + label 定义
-        fields, names = super()._get_fields()
+        fields, names = super().get_feature_config()
 
-        # 追加自定义因子到 feature 字段
         if self._custom_fields:
+            base_count = len(fields)
             for expr, name in self._custom_fields:
                 fields.append(expr)
                 names.append(name)
             logger.info(
-                f"因子总数: Alpha158({len(fields) - len(self._custom_fields)}) "
+                f"因子总数: Alpha158({base_count}) "
                 f"+ 自定义({len(self._custom_fields)}) = {len(fields)}"
             )
 

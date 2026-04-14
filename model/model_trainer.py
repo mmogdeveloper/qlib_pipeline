@@ -124,12 +124,14 @@ def _save_feature_importance(model, model_name: str, dataset=None) -> None:
             logger.warning("feature importance: 所有因子 gain 均为 0，跳过保存")
             return
 
-        # 获取自定义因子名集合（失败时 graceful degrade）
+        # 自定义因子名集合：直接从已构建的 handler 读取，避免重复调用 auto_filter
         custom_names: set = set()
         try:
-            custom_names = {name for _, name in get_custom_factor_expressions()}
+            handler = getattr(dataset, "handler", None)
+            cfields = getattr(handler, "_custom_fields", None) or []
+            custom_names = {name for _, name in cfields}
         except Exception as e:
-            logger.warning(f"feature importance: 无法加载自定义因子名，is_custom 列将全为 False: {e}")
+            logger.warning(f"feature importance: 无法从 handler 读取自定义因子名，is_custom 列将全为 False: {e}")
 
         # Alpha158 因子类别前缀映射
         _CATEGORY_PREFIXES = {
