@@ -62,6 +62,10 @@ def get_backtest_config() -> Dict[str, Any]:
     return config
 
 
+def get_analysis_config() -> Dict[str, Any]:
+    return load_config("analysis_config.yaml")["analysis"]
+
+
 def set_config_override(section: str, overrides: Dict[str, Any]):
     """设置运行时配置覆盖（不修改 YAML 文件）"""
     if section not in _config_overrides:

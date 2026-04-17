@@ -1,0 +1,25 @@
+# 鲁棒性分析参数网格
+# 所有 stage_sensitivity / stage_topk_sensitivity / stage_ndrop_sensitivity / stage_regime
+# 使用的参数网格集中在此，便于实盘迭代时无需改代码。
+
+analysis:
+  # 成本敏感性: 对基础成本（佣金/滑点/印花税）按倍数缩放
+  sensitivity:
+    cost_multipliers: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
+
+  # TopK 敏感性: 逐个测试不同持仓数；n_drop 固定为 strategy_config.yaml 中的基础值
+  topk_sensitivity:
+    topk_values: [10, 15, 20, 25, 30, 40, 50]
+
+  # n_drop 敏感性: 换手约束对 alpha 衰减的影响
+  ndrop_sensitivity:
+    n_drops: [1, 3, 5, 10, 20]
+
+  # 市场环境过滤: 用基准均线交叉判定牛熊，熊市降低仓位
+  regime:
+    ma_configs:
+      - { name: "无过滤(基准)", ma_short: 0,  ma_long: 0  }
+      - { name: "MA5>MA20",    ma_short: 5,  ma_long: 20 }
+      - { name: "MA10>MA30",   ma_short: 10, ma_long: 30 }
+      - { name: "MA20>MA60",   ma_short: 20, ma_long: 60 }
+      - { name: "MA5>MA60",    ma_short: 5,  ma_long: 60 }

@@ -42,8 +42,35 @@ from utils.helpers import (
     get_model_config,
     get_strategy_config,
     get_backtest_config,
+    get_analysis_config,
     ensure_dir,
 )
+
+
+def _backtest_metrics(recorder):
+    """跑一次回测并提取关键指标，失败返回 None。
+
+    封装 run_backtest_from_recorder → 解包 portfolio_metric 元组 →
+    compute_metrics_from_report 的公共流程，供各敏感性 stage 复用。
+    """
+    from signal_gen.portfolio import run_backtest_from_recorder
+    from evaluation.metrics import compute_metrics_from_report
+
+    bt_result = run_backtest_from_recorder(recorder)
+    portfolio_metric = bt_result["portfolio_metric"]
+    report_df = portfolio_metric[0] if isinstance(portfolio_metric, tuple) else portfolio_metric
+    if report_df is None or "return" not in report_df.columns:
+        return None
+    return compute_metrics_from_report(report_df)
+
+
+def _save_sweep_csv(df, prefix: str):
+    """把敏感性分析结果 DataFrame 保存为 reports/{prefix}_{YYYYMMDD}.csv。"""
+    import pandas as pd
+    report_dir = ensure_dir(PROJECT_ROOT / "reports")
+    csv_path = report_dir / f"{prefix}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return csv_path
 
 
 def stage_data(args):
@@ -280,8 +307,6 @@ def stage_sensitivity(args, recorder=None):
 
     import pandas as pd
     from data.data_loader import get_data_loader
-    from signal_gen.portfolio import run_backtest_from_recorder
-    from evaluation.metrics import compute_metrics_from_report
     from utils.helpers import set_config_override, clear_config_overrides
 
     get_data_loader().init_qlib()
@@ -291,8 +316,7 @@ def stage_sensitivity(args, recorder=None):
     if recorder is None:
         recorder = _get_recorder(args)
 
-    # 成本倍数: 0x (无成本), 0.5x, 1x (当前), 1.5x, 2x, 3x
-    cost_multipliers = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
+    cost_multipliers = get_analysis_config()["sensitivity"]["cost_multipliers"]
     base_st = get_strategy_config()
     base_open = (base_st["cost"]["buy_commission"] + base_st["cost"]["buy_slippage"])
     base_close = (base_st["cost"]["sell_commission"]
@@ -325,15 +349,8 @@ def stage_sensitivity(args, recorder=None):
         })
 
         try:
-            bt_result = run_backtest_from_recorder(recorder)
-            portfolio_metric = bt_result["portfolio_metric"]
-            if isinstance(portfolio_metric, tuple):
-                report_df = portfolio_metric[0]
-            else:
-                report_df = portfolio_metric
-
-            if report_df is not None and "return" in report_df.columns:
-                metrics = compute_metrics_from_report(report_df)
+            metrics = _backtest_metrics(recorder)
+            if metrics is not None:
                 results.append({
                     "cost_multiplier": label,
                     "open_cost": open_cost,
@@ -352,11 +369,8 @@ def stage_sensitivity(args, recorder=None):
         clear_config_overrides("backtest")
         clear_config_overrides("strategy")
 
-    # 输出敏感性分析结果
     df = pd.DataFrame(results)
-    report_dir = ensure_dir(PROJECT_ROOT / "reports")
-    csv_path = report_dir / f"sensitivity_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    csv_path = _save_sweep_csv(df, "sensitivity")
 
     # 打印汇总表
     logger.info("")
@@ -387,8 +401,6 @@ def stage_topk_sensitivity(args, recorder=None):
 
     import pandas as pd
     from data.data_loader import get_data_loader
-    from signal_gen.portfolio import run_backtest_from_recorder
-    from evaluation.metrics import compute_metrics_from_report
     from utils.helpers import set_config_override, clear_config_overrides
 
     get_data_loader().init_qlib()
@@ -396,30 +408,20 @@ def stage_topk_sensitivity(args, recorder=None):
     if recorder is None:
         recorder = _get_recorder(args)
 
-    # 测试一系列 topk 值。
-    # n_drop 固定为 1 以隔离 topk 的独立影响；
-    # 额外用 topk//10 测试"按比例 n_drop"的效果，供参考对比。
-    topk_values = [10, 15, 20, 25, 30, 40, 50]
+    topk_values = get_analysis_config()["topk_sensitivity"]["topk_values"]
     baseline_n_drop = get_strategy_config().get("n_drop", 1)
 
     results = []
     for topk in topk_values:
-        # 用固定 n_drop=1 隔离 topk 效应（与基础策略 n_drop 保持一致）
+        # n_drop 固定为基础策略值以隔离 topk 独立效应
         n_drop = baseline_n_drop
         logger.info(f"--- TopK={topk}, N_drop={n_drop} (固定, 隔离 topk 效应) ---")
 
         set_config_override("strategy", {"topk": topk, "n_drop": n_drop})
 
         try:
-            bt_result = run_backtest_from_recorder(recorder)
-            portfolio_metric = bt_result["portfolio_metric"]
-            if isinstance(portfolio_metric, tuple):
-                report_df = portfolio_metric[0]
-            else:
-                report_df = portfolio_metric
-
-            if report_df is not None and "return" in report_df.columns:
-                metrics = compute_metrics_from_report(report_df)
+            metrics = _backtest_metrics(recorder)
+            if metrics is not None:
                 results.append({
                     "topk": topk,
                     "n_drop": n_drop,
@@ -437,11 +439,8 @@ def stage_topk_sensitivity(args, recorder=None):
 
         clear_config_overrides("strategy")
 
-    # 输出结果
     df = pd.DataFrame(results)
-    report_dir = ensure_dir(PROJECT_ROOT / "reports")
-    csv_path = report_dir / f"topk_sensitivity_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    csv_path = _save_sweep_csv(df, "topk_sensitivity")
 
     logger.info("")
     logger.info("=" * 80)
@@ -478,7 +477,8 @@ def stage_ndrop_sensitivity(args, recorder=None):
 
     from analysis.ndrop_sensitivity import run_sensitivity, _save_results
 
-    n_drops = getattr(args, "n_drops", None) or [1, 3, 5, 10, 20]
+    n_drops = (getattr(args, "n_drops", None)
+               or get_analysis_config()["ndrop_sensitivity"]["n_drops"])
     df = run_sensitivity(
         model_name=args.model or "lgbm",
         n_drops=n_drops,
@@ -564,14 +564,7 @@ def stage_regime(args, recorder=None):
 
     bench_nav = (1 + bench_returns).cumprod()
 
-    # 测试不同均线周期的环境过滤
-    ma_configs = [
-        {"name": "无过滤(基准)", "ma_short": 0, "ma_long": 0},
-        {"name": "MA5>MA20", "ma_short": 5, "ma_long": 20},
-        {"name": "MA10>MA30", "ma_short": 10, "ma_long": 30},
-        {"name": "MA20>MA60", "ma_short": 20, "ma_long": 60},
-        {"name": "MA5>MA60", "ma_short": 5, "ma_long": 60},
-    ]
+    ma_configs = get_analysis_config()["regime"]["ma_configs"]
 
     results = []
     for mc in ma_configs:
@@ -658,11 +651,8 @@ def stage_regime(args, recorder=None):
             traceback.print_exc()
             results.append({"regime_filter": label, "error": str(e)})
 
-    # 输出结果
     df = pd.DataFrame(results)
-    report_dir = ensure_dir(PROJECT_ROOT / "reports")
-    csv_path = report_dir / f"regime_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    csv_path = _save_sweep_csv(df, "regime")
 
     logger.info("")
     logger.info("=" * 85)
